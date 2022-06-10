@@ -15,7 +15,3 @@ COPY --from=0 /usr/local /usr/local
 RUN apk update && \
     apk add --no-cache libstdc++ \
     && rm -rf /var/cache/apk/*
-RUN addgroup mercury -S && adduser mercury -G mercury -S && \
-    chown -R mercury:mercury /usr/local/share/mercury /usr/local/var/mercury/
-
-ENTRYPOINT ["/usr/local/bin/mercury", "-u", "mercury", "-c", "eth0"]
