@@ -1,4 +1,4 @@
 project: mercury
 target: mercury
 cmds:
-  - cmd: /repo/src/mercury -r @@
+  - cmd: /mercury -r @@
