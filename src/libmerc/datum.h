@@ -12,6 +12,7 @@
 #include <stdint.h>
 #include <arpa/inet.h>
 #include <string.h>
+#include <unistd.h>
 #include <array>
 #include <bitset>
 #include <limits>
@@ -256,6 +257,22 @@ struct datum {
         return false;
     }
 
+// trim_trail(t) skips/trims all instance of trailing char t
+//
+    void trim_trail(unsigned char trail) {
+        const unsigned char *tmp_data = data_end - 1;
+        if (*tmp_data != trail) {
+            return;
+        }
+        while (tmp_data >= data) {
+            if (*tmp_data != trail) { // end of trailing delimiter
+                data_end = tmp_data + 1;
+                return;
+            }
+            tmp_data--;
+        }
+    }
+
     bool isupper() {
         const uint8_t *d = data;
         while (d < data_end) {
@@ -308,6 +325,7 @@ struct datum {
         *output = 0;
     }
 
+    // [[nodiscard]]
     bool lookahead_uint(unsigned int num_bytes, uint64_t *output)
     {
         if (data + num_bytes <= data_end)
@@ -527,26 +545,33 @@ struct datum {
 static_assert(sizeof(datum) == 2 * sizeof(uint8_t *));
 
 
-// data_buffer is a contiguous sequence of bytes into which data can
-// be copied sequentially; the data structure tracks the start of the
-// data (buffer), the location to which data can be written (data),
-// and the end of the data buffer (data_end)
+// class writeable represents a writeable region of memory
 //
-template <size_t T> struct data_buffer {
-    unsigned char buffer[T];
-    unsigned char *data;                /* data being written        */
-    const unsigned char *data_end;      /* end of data buffer        */
+class writeable {
+public:
+    uint8_t *data;
+    uint8_t *data_end;      // TODO: const?
 
-    data_buffer() : data{buffer}, data_end{buffer+T} {  }
+    writeable(uint8_t *begin, uint8_t *end) : data{begin}, data_end{end} { }
 
-    void copy(uint8_t x) {
+    bool is_null() const { return data == nullptr || data_end == nullptr; }
+
+    bool is_not_empty() const { return data < data_end; }
+
+    //    ptrdiff_t length() const { return data_end - data; }
+
+    void set_null() { data = data_end = nullptr; }
+
+    void set_empty() { data = data_end; }
+
+        void copy(uint8_t x) {
         if (data + 1 > data_end) {
             return;  // not enough room
         }
         *data++ = x;
     }
     void copy(const uint8_t *rdata, size_t num_bytes) {
-        if (data_end - data < (int)num_bytes) {
+        if (data_end - data < (ssize_t)num_bytes) {
             num_bytes = data_end - data;
         }
         memcpy(data, rdata, num_bytes);
@@ -568,12 +593,76 @@ template <size_t T> struct data_buffer {
     void copy(struct datum &r) {
         copy(r, r.length());
     }
+
+    template <typename Type>
+    writeable & operator<<(Type t) {
+        fprintf(stderr, "writeable: {%p,%p}\tlength: %zd\n", data, data_end, data_end-data);
+        t.write(*this);
+        return *this;
+    }
+
+    // template specialization for datum
+    //
+    writeable & operator<<(datum d) {
+        fprintf(stderr, "writeable: {%p,%p}\tlength: %zd\n", data, data_end, data_end-data);
+        if (d.is_not_null()) {
+            copy(d);
+        }
+        return *this;
+    }
+
+};
+
+// data_buffer is a contiguous sequence of bytes into which data can
+// be copied sequentially; the data structure tracks the start of the
+// data (buffer), the location to which data can be written (data),
+// and the end of the data buffer (data_end)
+//
+template <size_t T> struct data_buffer : public writeable {
+    unsigned char buffer[T];
+    // unsigned char *data;                /* data being written        */
+    // const unsigned char *data_end;      /* end of data buffer        */
+
+    data_buffer() : writeable{buffer, buffer+T} { }
+
+
     void reset() { data = buffer; }
     bool is_not_empty() const { return data != buffer && data < data_end; }
     void set_empty() { data_end = data = buffer; }
-    ssize_t length() const { return data - buffer; }
+    ssize_t length() const { return data - buffer; } // TODO: return readable datum
 
     datum contents() const { return {buffer, data}; }
+
+    ssize_t writeable_length() const { return data_end - data; }
+
+    ssize_t write(int fd) { return ::write(fd, buffer, data - buffer);  }
+
+#if 0 // DELETEME
+    template <typename Type>
+    data_buffer<T> & operator<<(Type t) {
+        fprintf(stderr, "data_buffer: {%p,%p,%p}\treadable: %zd\twriteable: %zd\n", buffer, data, data_end, data-buffer, data_end-data);
+        t.write(*this);
+        return *this;
+    }
+
+    // template specialization for datum
+    //
+    data_buffer<T> & operator<<(datum d) {
+        fprintf(stderr, "data_buffer: {%p,%p,%p}\treadable: %zd\twriteable: %zd\n", buffer, data, data_end, data-buffer, data_end-data);
+        if (d.is_not_null()) {
+            copy(d);
+        }
+        return *this;
+    }
+#endif // DELETEME
+
+    // TODO:
+    //  * add data != nullptr checks
+    //  * add set_null() function
+    //  * use null state to indicate write failure
+    //  * add assert() macros to support debugging
+    //  * add [[nodiscard]] as appropriate
+
 };
 
 
@@ -619,12 +708,14 @@ bool bit(T s) {
     return (bool) slice<i,i+1>(s);
 }
 
-// encoded<T> represents an integer type T that is read from a byte
-// stream
+// encoded<T> represents an unsigned integer type T that is read from
+// a byte stream
 //
 template <typename T>
 class encoded {
     T val;
+
+    static_assert(std::is_unsigned_v<T>, "T must be an unsigned integer");
 
 public:
 
@@ -638,7 +729,8 @@ public:
     }
     //
     // TODO: re-implement constructor in a way that avoids a temporary
-    // size_t variable, especially for smaller integer types
+    // size_t variable, especially for smaller integer types; make it
+    // constexpr
 
     encoded(const T& rhs) {
         val = rhs;
@@ -690,7 +782,15 @@ public:
     // TODO: add a function slice<i,j>(T newvalue) that sets the bits
     // associated with a slice
 
-    // TODO: add write(data_buffer) function
+    void write(writeable &buf, bool swap_byte_order=false) {
+        encoded<T> tmp = val;
+        if (swap_byte_order) {
+            tmp.swap_byte_order();
+        }
+        buf.copy((uint8_t *)&tmp, sizeof(T));
+
+        // TODO: rewrite function to eliminate cast
+    }
 
 };
 

@@ -29,7 +29,7 @@ python      = @PY@
 have_py3    = @PYTHON3@
 have_pip3   = @PIP3@
 have_tpkt3  = @HAVE_TPACKET_V3@
-CDEFS       = $(filter -DHAVE_PYTHON3=1, @DEFS@) -DDEFAULT_RESOURCE_DIR="\"$(datarootdir)\""
+CDEFS       = $(filter -DHAVE_PYTHON3=1 -DHAVE_X86INTRIN_H=1, @DEFS@) -DDEFAULT_RESOURCE_DIR="\"$(datarootdir)\""
 
 include ../Makefile_helper.mk
 
@@ -187,8 +187,8 @@ string: string.cc stringalgs.h options.h
 decode: decode.cc
 	$(CXX) $(CFLAGS) decode.cc -o decode
 
-pcap: pcap.cc pcap_file_io.c pcap_file_io.h
-	$(CXX) $(CFLAGS) pcap.cc pcap_file_io.c -o pcap
+pcap: pcap.cc pcap_file_io.h
+	$(CXX) $(CFLAGS) pcap.cc -o pcap
 
 pcap_filter: pcap_filter.cc pcap_file_io.c libmerc
 	$(CXX) $(CFLAGS) pcap_filter.cc pcap_file_io.c libmerc/libmerc.a -lz -lcrypto -pthread -o pcap_filter
@@ -225,7 +225,7 @@ libmerc_driver:
 #
 
 intercept.so: intercept.cc libmerc.a
-	g++ -std=c++17 -Wall -Wno-narrowing intercept.cc libmerc/pkt_proc.cc -D_GNU_SOURCE -I/usr/include/nspr/ -fPIC -shared -lssl -lnspr4 -lgnutls libmerc/libmerc.a -o intercept.so
+	$(CXX) -std=c++17 -Wall -Wno-narrowing intercept.cc libmerc/pkt_proc.cc -D_GNU_SOURCE -I/usr/include/nspr/ -fPIC -shared -lssl -lnspr4 -lgnutls libmerc/libmerc.a -o intercept.so
 
 # special targets
 #

@@ -17,6 +17,8 @@ void dump_packet_info(struct datum &pkt_data);
 
 int main(int argc, char *argv[]) {
 
+    pcap::writer w{"test"};
+
     if (argc != 2) {
         fprintf(stderr, "error: no file argument provided\nusage: %s <pcap file name>\n", argv[0]);
         exit(EXIT_FAILURE);
@@ -36,6 +38,7 @@ int main(int argc, char *argv[]) {
                 break;
             }
             //fprintf(stdout, "packet.caplen: %u\n", pkt.caplen());
+            w.write(pkt_data);
             dump_packet_info(pkt_data);
             i++;
         }

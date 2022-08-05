@@ -21,6 +21,7 @@
 #include "global_config.h"
 #include "quic.h"
 #include "perfect_hash.h"
+#include "crypto_assess.h"
 
 /**
  * enum linktype is a 16-bit enumeration that identifies a protocol
@@ -86,13 +87,16 @@ class unknown_initial_packet;
 class quic_init;                         // start of udp protocols
 struct wireguard_handshake_init;
 struct dns_packet;
+struct mdns_packet;
 class dtls_client_hello;
 class
 dtls_server_hello;
 struct dhcp_discover;
+class ssdp;
 class unknown_udp_initial_packet;
 class icmp_packet;                        // start of ip protocols
 class ospf;
+class sctp_init;
 struct tcp_packet;
 
 using protocol = std::variant<std::monostate,
@@ -108,12 +112,15 @@ using protocol = std::variant<std::monostate,
                               quic_init,                         // start of udp protocols
                               wireguard_handshake_init,
                               dns_packet,
+                              mdns_packet,
                               dtls_client_hello,
                               dtls_server_hello,
                               dhcp_discover,
+                              ssdp,
                               unknown_udp_initial_packet,
                               icmp_packet,                        // start of ip protocols
                               ospf,
+                              sctp_init,
                               tcp_packet
                               >;
 
@@ -132,6 +139,7 @@ struct stateful_pkt_proc {
     class traffic_selector &selector;
     quic_crypto_engine quic_crypto;
     perfect_hash_visitor& ph_visitor;
+    crypto_policy::assessor *crypto_policy = nullptr;
 
     explicit stateful_pkt_proc(mercury_context mc, size_t prealloc_size=0) :
         ip_flow_table{prealloc_size},
@@ -149,6 +157,12 @@ struct stateful_pkt_proc {
         quic_crypto{},
         ph_visitor{perfect_hash_visitor::get_default_perfect_hash_visitor()}
     {
+
+        constexpr bool DO_CRYPTO_ASSESSMENT = false;
+        if (DO_CRYPTO_ASSESSMENT) {
+            // set crypto assessment policy
+            crypto_policy = new crypto_policy::quantum_safe;
+        }
 
         // set config and classifier to (refer to) context m
         //
@@ -179,6 +193,7 @@ struct stateful_pkt_proc {
     }
 
     ~stateful_pkt_proc() {
+        delete crypto_policy;
         // we could call ag->remote_procuder(mq), but for now we do not
     }
 
@@ -268,7 +283,8 @@ struct stateful_pkt_proc {
     void set_udp_protocol(protocol &x,
                           struct datum &pkt,
                           enum udp_msg_type msg_type,
-                          bool is_new);
+                          bool is_new,
+                          const struct key& k);
 };
 
 #endif /* PKT_PROC_H */
