@@ -19,6 +19,7 @@
 #include <string>
 #include <cassert>
 #include "libmerc.h"  // for enum status
+#include "buffer_stream.h"
 
 /*
  * The mercury_debug macro is useful for debugging (but quite verbose)
@@ -47,7 +48,7 @@ struct datum {
 
     datum() : data{NULL}, data_end{NULL} {}
     datum(const unsigned char *first, const unsigned char *last) : data{first}, data_end{last} {}
-    datum(datum &d, size_t length) {
+    datum(datum &d, ssize_t length) {
         parse(d, length);
     }
     datum(std::pair<const unsigned char *, const unsigned char *> p) : data{p.first}, data_end{p.second} {}
@@ -69,8 +70,8 @@ struct datum {
     void set_empty() { data = data_end; }
     void set_null() { data = data_end = NULL; }
     ssize_t length() const { return data_end - data; }
-    void parse(struct datum &r, size_t num_bytes) {
-        if (r.length() < (ssize_t)num_bytes) {
+    void parse(struct datum &r, ssize_t num_bytes) {
+        if (r.length() < num_bytes || num_bytes < 0) {
             r.set_null();
             set_null();
             //fprintf(stderr, "warning: not enough data in parse (need %zu, have %zd)\n", num_bytes, length());
@@ -178,9 +179,41 @@ struct datum {
             return true;
         }
     }
-    int memcmp(const datum &p) const {
-        return ::memcmp(data, p.data, length());
+
+    // datum::memcmp(datum &p) compares this datum to p
+    // lexicographically, and returns an integer less than, equal to,
+    // or greater than zero if this is found to be less than, to
+    // match, or to be greater than p, respectively.
+    //
+    // For a nonzero return value, the sign is determined by the sign
+    // of the difference between the first pair of bytes (interpreted
+    // as unsigned char) that differ in this and p.  If this->length()
+    // and p.length() are both zero, the return value is zero.  If one
+    // datum is a prefix of the other, the prefix is considered
+    // lesser.
+    //
+    // Examples (in hexadecimal, where {} is the zero-length string):
+    //
+    //    A = 50555348, B = 504f5354:    A.memcmp(B) < 0
+    //    A = 50555348, B = 5055534820:  A.memcmp(B) < 0
+    //    A = 50555348, B = {}:          A.memcmp(B) > 0
+    //    A = {}, B = {}:                A.memcmp(B) == 0
+    //
+    int cmp(const datum &p) const {
+        int cmp = ::memcmp(data, p.data, std::min(length(), p.length()));
+        if (cmp == 0) {
+            return length() - p.length();
+        }
+        return cmp;
     }
+
+    // operator<(const datum &p) returns true if this is
+    // lexicographically less than p, and false otherwise.  It is
+    // suitable for use in std::sort().
+    //
+    bool operator<(const datum &p) const {
+        return cmp(p) < 0;
+     }
 
     template <size_t N>
     bool cmp(const std::array<uint8_t, N> a) const {
@@ -297,7 +330,7 @@ struct datum {
                 return false;
             }
         }
-        set_empty();
+        set_null();
         return true;
     }
 
@@ -313,7 +346,7 @@ struct datum {
                 alternatives++;
             }
         }
-        set_empty();
+        set_null();
         return true;
     }
 
@@ -493,6 +526,15 @@ struct datum {
         return true;
     }
 
+    bool copy(unsigned char *dst, ssize_t dst_len) {
+        if (length() > dst_len) {
+            memcpy(dst, data, dst_len);
+            return false;
+        }
+        memcpy(dst, data, length());
+        return true;
+    }
+
     bool strncpy(char *dst, ssize_t dst_len) {
         if (length() + 1 > dst_len) {
             memcpy(dst, data, dst_len - 1);
@@ -512,6 +554,7 @@ struct datum {
     }
 
     void fprint_hex(FILE *f, size_t length=0) const {
+        if (data == nullptr) { return; }
         const uint8_t *x = data;
         const uint8_t *end = data_end;
         if (length) {
@@ -577,6 +620,14 @@ struct datum {
         return -1;
     }
 
+    bool is_printable() const {
+        for (const auto & c: *this) {
+            if (!isprint(c)) {
+                return false;
+            }
+        }
+        return true;
+    }
 };
 
 // sanity checks on class datum
@@ -640,6 +691,24 @@ public:
         }
     }
 
+    void write_quote_enclosed_hex(const uint8_t *src, size_t num_bytes) {
+        copy('"');
+        write_hex(src, num_bytes);
+        copy('"');
+    }
+
+    template <typename Type>
+    void write_hex(Type T) {
+        T.write_hex(*this);
+    }
+
+    template <typename Type>
+    void write_quote_enclosed_hex(Type T) {
+        copy('"');
+        write_hex(T);
+        copy('"');
+    }
+
     // parse(r, num_bytes) copies num_bytes out of r and into this, and
     // advances r, if this writeable has enough room for the data and
     // r contains at least num_bytes.  If r.length() < num_bytes, then
@@ -699,7 +768,12 @@ template <size_t T> struct data_buffer : public writeable {
     // otherwise, zero is returned
     //
     ssize_t readable_length() const {
+        if (writeable::is_null()) {
+            return 0;
+        }
+        else {
             return data - buffer;
+        }
     }
 
     datum contents() const {
@@ -920,6 +994,58 @@ public:
     }
 };
 
+// class type_codes is a wrapper class and can be used to print typecodes. It inherently has a function
+// to write to json_object, a string depending on known typecodes for that class. The class utilises the json_object template function
+// print_key_value to write a type_code string. The type_code class to be wrapped must have a type_code, and functions:
+// template T get_code() to return code value and
+// char* print_code_str() to return code str or returns null for unknown code
+template <typename T>
+class type_codes {
+    const T &code;
+
+public:
+    type_codes(const T &type_code) : code{type_code} {}
+
+    void print_code(buffer_stream &b, encoded<uint8_t> code) {
+        b.write_uint8(code.value());
+    }
+
+    void print_code(buffer_stream &b, encoded<uint16_t> code) {
+        b.write_uint16(code.value());
+    }
+
+    void print_code(buffer_stream &b, uint8_t code) {
+        b.write_uint8(code);
+    }
+
+    void print_code(buffer_stream &b, uint16_t code) {
+        b.write_uint16(code);
+    }
+
+    // template function for code types with custom code writing functions
+    template <typename code_type>
+    void print_code(buffer_stream &b, code_type code) {
+        code.write_code(b);
+    }
+
+    template <typename code_type>
+    void print_unknown_code(buffer_stream &b, code_type code) {
+        b.puts("UNKNOWN (");
+        print_code(b, code);
+        b.puts(")");
+    }
+
+    void fingerprint(buffer_stream &b) {
+        const char* code_str = code.get_code_str();
+        if (!code_str) {
+            print_unknown_code(b, code.get_code());
+        }
+        else {
+            b.puts(code_str);
+        }
+    }
+};
+
 // class literal is a literal std::array of characters
 //
 template <size_t N>
@@ -1065,6 +1191,35 @@ public:
     acceptor(datum &d) : value{d}, valid{d.is_not_null()} { }
 
     operator bool() const { return valid; }
+};
+
+// class optional<T> attempts to read an element of type T from a
+// datum reference.  If the read succeeds, the datum is advanced
+// forward, and casting the optional<T> object to a bool returns true;
+// otherwise, that cast returns false.  On success, the value of the
+// element can be accessed through the public value member.  If the
+// read fails, the datum is left unchanged (it is neither advanced nor
+// set to null).
+//
+template <typename T>
+class optional {
+    datum tmp;
+public:
+    T value;
+private:
+    bool valid;
+public:
+
+    optional(datum &d) :
+        tmp{d},
+        value{tmp},
+        valid{tmp.is_not_null()}
+    {
+        if (valid) {
+            d = tmp;
+        }
+    }
+
 };
 
 // class ignore<T> parses a data element of type T, but then ignores

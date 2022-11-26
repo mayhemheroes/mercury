@@ -45,6 +45,7 @@ char mercury_help[] =
     "   --config c                            # read configuration from file c\n"
     "   [-a or --analysis]                    # analyze fingerprints\n"
     "   --resources=f                         # use resource file f\n"
+    "   --format=f                            # report fingerprints with formats(s) f\n"
     "   --stats=f                             # write stats to file f\n"
     "   --stats-time=T                        # write stats every T seconds\n"
     "   --stats-limit=L                       # limit stats to L entries\n"
@@ -90,22 +91,32 @@ char mercury_extended_help[] =
     "\n"
     "   \"[-s or --select] f\" selects packets according to the metadata filter f, which\n"
     "   is a comma-separated list of the following strings:\n"
+    "      arp               ARP message\n"
+    "      cdp               CDP message\n"
     "      dhcp              DHCP discover message\n"
     "      dns               DNS messages\n"
     "      dtls              DTLS clientHello, serverHello, and certificates\n"
+    "      gre               GRE message\n"
     "      http              HTTP request and response\n"
     "      http.request      HTTP request\n"
     "      http.response     HTTP response\n"
+    "      icmp              ICMP message\n"
     "      iec               IEC 60870-5-104\n"
+    "      lldp              LLDP message\n"
     "      mdns              multicast DNS\n"
     "      nbns              NetBIOS Name Service\n"
+    "      nbds              NetBIOS Datagram Service\n"
+    "      nbss              NetBIOS Session Service\n"
+    "      ospf              OSPF message\n"
     "      quic              QUIC handshake\n"
+    "      sctp              SCTP message\n"
     "      ssh               SSH handshake and KEX\n"
     "      smb               SMB v1 and v2\n"
     "      stun              STUN messages\n"
     "      ssdp              SSDP (UPnP)\n"
     "      tcp               TCP headers\n"
     "      tcp.message       TCP initial message\n"
+    "      tcp.syn_ack       TCP syn ack message\n"
     "      tls               TLS clientHello, serverHello, and certificates\n"
     "      tls.client_hello  TLS clientHello\n"
     "      tls.server_hello  TLS serverHello\n"
@@ -147,6 +158,10 @@ char mercury_extended_help[] =
     "   [-a or --analysis] performs analysis and reports results in the \"analysis\"\n"
     "   object in the JSON records.   This option only works with the option\n"
     "   [-f or --fingerprint].\n"
+    "\n"
+    "   \"--format=f\" reports fingerprints with formats(s) f, where f is either a\n"
+    "   fingerprint protocol and format like \"tls/1\", or is a sequence of protocol\n"
+    "   and format strings.\n"
     "\n"
     "   \"[-l or --limit] l\" rotates output files so that each file has at most\n"
     "   l records or packets; filenames include a sequence number, date and time.\n"
@@ -216,8 +231,10 @@ int main(int argc, char *argv[]) {
 
     //extern double malware_prob_threshold;  // TODO - expose hidden command
 
+    std::string additional_args{';'};
+
     while(1) {
-        enum opt { config=1, version=2, license=3, dns_json=4, certs_json=5, metadata=6, resources=7, tcp_init_data=8, udp_init_data=9, write_stats=10, stats_limit=11, stats_time=12, output_time=13, tcp_reassembly=14 };
+        enum opt { config=1, version=2, license=3, dns_json=4, certs_json=5, metadata=6, resources=7, tcp_init_data=8, udp_init_data=9, write_stats=10, stats_limit=11, stats_time=12, output_time=13, tcp_reassembly=14, format=15 };
         int opt_idx = 0;
         static struct option long_opts[] = {
             { "config",      required_argument, NULL, config  },
@@ -234,6 +251,7 @@ int main(int argc, char *argv[]) {
             { "stats-time",  required_argument, NULL, stats_time },
             { "output-time", required_argument, NULL, output_time },
             { "tcp-reassembly", no_argument,    NULL, tcp_reassembly },
+            { "format",      required_argument, NULL, format },
             { "read",        required_argument, NULL, 'r' },
             { "write",       required_argument, NULL, 'w' },
             { "directory",   required_argument, NULL, 'd' },
@@ -325,6 +343,13 @@ int main(int argc, char *argv[]) {
                 usage(argv[0], "option tcp-reassembly does not use an argument", extended_help_off);
             } else {
                 extended_cfg.tcp_reassembly = true;
+            }
+            break;
+        case format:
+            if (option_is_valid(optarg)) {
+                additional_args.append("format=").append(optarg).append(";");
+            } else {
+                usage(argv[0], "option format requires fingerprint format argument", extended_help_off);
             }
             break;
         case 'r':
@@ -545,6 +570,9 @@ int main(int argc, char *argv[]) {
     if (optind < argc) {
         printf("unused options string(s): ");
         while (optind < argc) {
+            const char *option = argv[optind];
+            additional_args.append(option);
+            additional_args += ';';
             printf("%s ", argv[optind++]);
         }
         printf("\n");
@@ -577,6 +605,7 @@ int main(int argc, char *argv[]) {
         set_proto_str.assign("");
         libmerc_cfg.packet_filter_cfg = (char *)"";
     }
+    set_proto_str += additional_args;
     extended_cfg.set_extended_cfg(libmerc_cfg, set_proto_str);
     extended_cfg.new_proto_str = strcpy(new char[set_proto_str.length() + 1], set_proto_str.c_str());
     libmerc_cfg.packet_filter_cfg = extended_cfg.new_proto_str;

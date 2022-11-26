@@ -74,7 +74,9 @@ private:
 
 public:
     // extended configs
+    std::string temp_proto_str;
     bool tcp_reassembly = false;          /* reassemble tcp segments      */
+    size_t tls_fingerprint_format = 0;    // default fingerprint format
 
     global_config() : libmerc_config(), tcp_reassembly{false} {};
     global_config(const libmerc_config& c) : libmerc_config(c), tcp_reassembly{false} {
@@ -97,30 +99,41 @@ public:
     }
 
     std::map<std::string, bool> protocols {
-            { "all",         false },
-            { "none",        false },
-            { "dhcp",        false },
-            { "dns",         false },
-            { "dtls",        false },
-            { "http",        false },
-            { "mdns",        false },
-            { "nbns",        false },
-            { "ssh",         false },
-            { "tcp",         false },
-            { "tcp.message", false },
-            { "tls",         false },
-            { "wireguard",   false },
-            { "quic",        false },
-            { "smb",         false },
-            { "smtp",        false },
-            { "ssdp",        false },
-            { "stun",        false },
-            { "tls.client_hello", false},
-            { "tls.server_hello", false},
+            { "all",                    false },
+            { "none",                   false },
+            { "arp",                    false },
+            { "cdp",                    false },
+            { "dhcp",                   false },
+            { "dnp3",                   false },
+            { "dns",                    false },
+            { "dtls",                   false },
+            { "gre",                    false },
+            { "http",                   false },
+            { "http.request",           false },
+            { "http.response",          false },
+            { "icmp",                   false },
+            { "iec",                    false },
+            { "lldp",                   false },
+            { "mdns",                   false },
+            { "nbns",                   false },
+            { "nbds",                   false },
+            { "nbss",                   false },
+            { "ospf",                   false },
+            { "quic",                   false },
+            { "sctp",                   false },
+            { "smb",                    false },
+            { "smtp",                   false },
+            { "ssdp",                   false },
+            { "ssh",                    false },
+            { "stun",                   false },
+            { "tcp",                    false },
+            { "tcp.message",            false },
+            { "tcp.syn_ack",            false },
+            { "tls",                    false },
+            { "tls.client_hello",       false },
+            { "tls.server_hello",       false },
             { "tls.server_certificate", false},
-            { "http.request", false},
-            { "http.response", false},
-            { "iec",           false}
+            { "wireguard",              false },
         };
 
     bool set_protocols(const std::string& data) {
@@ -153,14 +166,26 @@ public:
         }
         return true;
     }
-    
+
+    bool set_fingerprint_format(const std::string &s) {
+        if (s == "tls") {
+            tls_fingerprint_format = 0;
+        } else if (s == "tls/1") {
+            tls_fingerprint_format = 1;
+        } else {
+            printf_err(log_warning, "warning: unknown fingerprint format: %s; using default instead\n", s.c_str());
+            return false;
+        }
+        return true;
+    }
 };
 
 static void setup_extended_fields(global_config* lc, const std::string& config) {
 
     std::vector<libmerc_option> options = {
         {"select", "-s", "--select", SETTER_FUNCTION(&lc){ lc->set_protocols(s); }},
-        {"resources", "", "", SETTER_FUNCTION(&lc){ lc->set_resource_file(s); }}
+        {"resources", "", "", SETTER_FUNCTION(&lc){ lc->set_resource_file(s); }},
+        {"format", "", "", SETTER_FUNCTION(&lc){ lc->set_fingerprint_format(s); }}
     };
 
     parse_additional_options(options, config, *lc);
