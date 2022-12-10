@@ -59,7 +59,8 @@ jobs:
       fail-fast: false
       matrix:
         mayhemfile:
-          - mayhem/Mayhemfile
+          - mayhem/Mayhemfile_get_domain_name
+          - mayhem/Mayhemfile_mercury
 
     steps:
       - uses: actions/checkout@v3
