@@ -1,0 +1,5 @@
+project: mercury
+target: get-domain-name
+cmds:
+  - cmd: /fuzz_get_domain_name
+    libfuzzer: true
