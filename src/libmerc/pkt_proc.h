@@ -21,6 +21,7 @@
 #include "global_config.h"
 #include "quic.h"
 #include "perfect_hash.h"
+#include "crypto_assess.h"
 
 /**
  * enum linktype is a 16-bit enumeration that identifies a protocol
@@ -82,18 +83,24 @@ struct ssh_init_packet;
 struct ssh_kex_init;
 class smtp_client;
 class smtp_server;
+class dnp3;
 class unknown_initial_packet;
 class quic_init;                         // start of udp protocols
 struct wireguard_handshake_init;
 struct dns_packet;
+struct mdns_packet;
 class dtls_client_hello;
 class
 dtls_server_hello;
 struct dhcp_discover;
+class ssdp;
+//class stun::message;
 class unknown_udp_initial_packet;
 class icmp_packet;                        // start of ip protocols
 class ospf;
+class sctp_init;
 struct tcp_packet;
+class iec60870_5_104;
 
 using protocol = std::variant<std::monostate,
                               http_request,                      // start of tcp protocols
@@ -104,19 +111,28 @@ using protocol = std::variant<std::monostate,
                               ssh_kex_init,
                               smtp_client,
                               smtp_server,
+                              iec60870_5_104,
+                              dnp3,
+                              nbss_packet,
                               unknown_initial_packet,
                               quic_init,                         // start of udp protocols
                               wireguard_handshake_init,
                               dns_packet,
+                              mdns_packet,
                               dtls_client_hello,
                               dtls_server_hello,
                               dhcp_discover,
+                              ssdp,
+                              stun::message,
+                              nbds_packet,
                               unknown_udp_initial_packet,
                               icmp_packet,                        // start of ip protocols
                               ospf,
-                              tcp_packet
+                              sctp_init,
+                              tcp_packet,
+                              smb1_packet,
+                              smb2_packet
                               >;
-
 struct stateful_pkt_proc {
     struct flow_table ip_flow_table;
     struct flow_table_tcp tcp_flow_table;
@@ -132,6 +148,7 @@ struct stateful_pkt_proc {
     class traffic_selector &selector;
     quic_crypto_engine quic_crypto;
     perfect_hash_visitor& ph_visitor;
+    crypto_policy::assessor *crypto_policy = nullptr;
 
     explicit stateful_pkt_proc(mercury_context mc, size_t prealloc_size=0) :
         ip_flow_table{prealloc_size},
@@ -149,6 +166,12 @@ struct stateful_pkt_proc {
         quic_crypto{},
         ph_visitor{perfect_hash_visitor::get_default_perfect_hash_visitor()}
     {
+
+        constexpr bool DO_CRYPTO_ASSESSMENT = false;
+        if (DO_CRYPTO_ASSESSMENT) {
+            // set crypto assessment policy
+            crypto_policy = new crypto_policy::quantum_safe;
+        }
 
         // set config and classifier to (refer to) context m
         //
@@ -169,16 +192,21 @@ struct stateful_pkt_proc {
             }
         }
 
-#ifndef USE_TCP_REASSEMBLY
+        if (!global_vars.tcp_reassembly) {
+            reassembler_ptr = nullptr;
+        }
+
+//#ifndef USE_TCP_REASSEMBLY
 // #pragma message "omitting tcp reassembly; 'make clean' and recompile with OPTFLAGS=-DUSE_TCP_REASSEMBLY to use that option"
-        reassembler_ptr = nullptr;
-#else
+//        reassembler_ptr = nullptr;
+//#else
       // #pragma message "using tcp reassembly; 'make clean' and recompile to omit that option"
-#endif
+//#endif
 
     }
 
     ~stateful_pkt_proc() {
+        delete crypto_policy;
         // we could call ag->remote_procuder(mq), but for now we do not
     }
 
@@ -260,6 +288,13 @@ struct stateful_pkt_proc {
                                       struct timespec *ts,
                                       struct tcp_reassembler *reassembler);
 
+    bool process_tcp_data (protocol &x,
+                          struct datum &pkt,
+                          struct tcp_packet &tcp_pkt,
+                          struct key &k,
+                          struct timespec *ts, 
+                          struct tcp_reassembler *reassembler);
+    
     void set_tcp_protocol(protocol &x,
                           struct datum &pkt,
                           bool is_new,
@@ -268,7 +303,10 @@ struct stateful_pkt_proc {
     void set_udp_protocol(protocol &x,
                           struct datum &pkt,
                           enum udp_msg_type msg_type,
-                          bool is_new);
+                          bool is_new,
+                          const struct key& k);
+
+    bool dump_pkt ();
 };
 
 #endif /* PKT_PROC_H */

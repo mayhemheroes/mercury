@@ -14,26 +14,18 @@
 #include "tcp.h"
 #include "tcpip.h"
 
-struct tls_security_assessment {
-    bool weak_version_offered;
-    bool weak_ciphersuite_offered;
-    bool weak_elliptic_curve_offered;
-    bool weak_version_used;
-    bool weak_ciphersuite_used;
-    bool weak_elliptic_curve_used;
-    bool weak_key_size_used;
 
-    tls_security_assessment() :
-        weak_version_offered{false},
-        weak_ciphersuite_offered{false},
-        weak_elliptic_curve_offered{false},
-        weak_version_used{false},
-        weak_ciphersuite_used{false},
-        weak_elliptic_curve_used{false},
-        weak_key_size_used{false}
-    {  }
+// class xtn represents a TLS extension
+//
+class xtn {
+    encoded<uint16_t> type_;
+    encoded<uint16_t> length;
+public:
+    datum value;
 
-    void print(struct json_object &o, const char *key);
+    xtn(datum &d) : type_{d}, length{d}, value{d, length} { }
+
+    uint16_t type() const { return type_; }
 };
 
 
@@ -222,7 +214,7 @@ struct tls_handshake {
     handshake_type msg_type;
     uint32_t length;  // note: only 24 bits on the wire (L_HandshakeLength)
     struct datum body;
-    size_t additional_bytes_needed;
+    size_t additional_bytes_needed = 0;
 
     static const unsigned int max_handshake_len = 32768;
 
@@ -264,7 +256,7 @@ struct tls_handshake {
 struct tls_server_certificate {
     uint32_t length; // note: only 24 bits on the wire (L_CertificateListLength)
     struct datum certificate_list;
-    size_t additional_bytes_needed;
+    size_t additional_bytes_needed = 0;
 
     static const size_t max_length = 65536;
 
@@ -336,6 +328,9 @@ struct tls_extensions : public datum {
                        datum& alpn) const;
 
     void fingerprint(struct buffer_stream &b, enum tls_role role) const;
+
+    datum get_supported_groups() const;
+
 };
 
 
@@ -359,15 +354,13 @@ struct tls_client_hello : public tcp_base_protocol {
 
     bool is_not_empty() const { return compression_methods.is_not_empty(); };
 
-    void fingerprint(struct buffer_stream &buf) const;
+    void fingerprint(struct buffer_stream &buf, size_t format_version=0) const;
 
-    void compute_fingerprint(class fingerprint &fp) const;
+    void compute_fingerprint(class fingerprint &fp, size_t format_version=0) const;
 
     static void write_json(struct datum &data, struct json_object &record, bool output_metadata);
 
     void write_json(struct json_object &record, bool output_metadata) const;
-
-    struct tls_security_assessment security_assesment();
 
     bool do_analysis(const struct key &k_, struct analysis_context &analysis_, classifier *c);
 
@@ -386,7 +379,6 @@ struct tls_server_hello : public tcp_base_protocol {
     struct datum ciphersuite_vector;
     struct datum compression_method;
     struct tls_extensions extensions;
-    bool dtls = false;
 
     tls_server_hello() {  }
 
@@ -427,13 +419,7 @@ struct tls_server_hello : public tcp_base_protocol {
     }
 
     void compute_fingerprint(class fingerprint &fp) const {
-        enum fingerprint_type type;
-        if (dtls) {
-            type = fingerprint_type_dtls_server;
-        } else {
-            type = fingerprint_type_tls_server;
-        }
-        fp.set_type(type);
+        fp.set_type(fingerprint_type_tls_server);
         fp.add(*this);
         fp.final();
     }
@@ -530,5 +516,91 @@ public:
     }
 
 };
+
+
+
+// struct {
+//     public-key-encrypted PreMasterSecret pre_master_secret;
+// } EncryptedPreMasterSecret;
+
+class encrypted_premaster_secret {
+
+public:
+
+    encrypted_premaster_secret(datum &)
+    {}
+};
+
+//       enum { implicit, explicit } PublicValueEncoding;
+//
+//       implicit
+//          If the client has sent a certificate which contains a suitable
+//          Diffie-Hellman key (for fixed_dh client authentication), then
+//          Yc is implicit and does not need to be sent again.  In this
+//          case, the client key exchange message will be sent, but it MUST
+//          be empty.
+//
+//       explicit
+//          Yc needs to be sent.
+//
+//       struct {
+//           select (PublicValueEncoding) {
+//               case implicit: struct { };
+//               case explicit: opaque dh_Yc<1..2^16-1>;
+//           } dh_public;
+//       } ClientDiffieHellmanPublic;
+//
+class client_diffie_hellman_public {
+public:
+
+    client_diffie_hellman_public(datum &)
+    { }
+};
+
+// ClientKeyExchange format (following RFC 5246, TLSv1.2)
+//
+// struct {
+//     select (KeyExchangeAlgorithm) {
+//         case rsa:
+//             EncryptedPreMasterSecret;
+//         case dhe_dss:
+//         case dhe_rsa:
+//         case dh_dss:
+//         case dh_rsa:
+//         case dh_anon:
+//             ClientDiffieHellmanPublic;
+//     } exchange_keys;
+// } ClientKeyExchange;
+
+class client_key_exchange {
+    datum value;
+
+public:
+
+    client_key_exchange(datum &d) : value{d}
+    {}
+};
+
+namespace {
+
+    [[maybe_unused]] int tls_client_hello_fuzz_test(const uint8_t *data, size_t size) {
+        struct datum hello_data{data, data+size};
+        char buffer_1[8192];
+        struct buffer_stream buf_json(buffer_1, sizeof(buffer_1));
+        char buffer_2[8192];
+        struct buffer_stream buf_fp(buffer_2, sizeof(buffer_2));
+        struct json_object record(&buf_json);
+        
+
+        tls_client_hello hello{hello_data};
+        if (hello.is_not_empty()) {
+            hello.write_json(record, true);
+            hello.fingerprint(buf_fp);
+        }
+
+        return 0;
+    } 
+
+}; //end of namespace
 
 #endif /* TLS_H */

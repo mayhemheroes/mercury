@@ -268,23 +268,23 @@ TEST_CASE_METHOD(LibmercTestFixture, "test dns and mdns with recources-mp")
              .m_lc{.do_analysis = true, .resources = resources_mp_path,
                 .packet_filter_cfg = (char *)"dns"},
              .m_pc{"capture2.pcap"}},
-         809},
+         785},
         {test_config{
              .m_lc{.dns_json_output = true, .do_analysis = true,
                 .resources = resources_mp_path,
                 .packet_filter_cfg = (char *)"dns"},
              .m_pc{"capture2.pcap"}},
-         809},
+         785},
         {test_config{
              .m_lc{.do_analysis = true, .resources = resources_mp_path,
-                .packet_filter_cfg = (char *)"dns"},
+                .packet_filter_cfg = (char *)"mdns"},
              .m_pc{"mdns_capture.pcap"}},
          3141},
         {test_config{
              .m_lc{.do_analysis = true, .resources = resources_mp_path,
                 .packet_filter_cfg = (char *)"dns"},
              .m_pc{"dns_packet.capture2.pcap"}},
-         809},
+         785},
         {test_config{
              .m_lc{.do_analysis = true, .resources = resources_mp_path,
                 .packet_filter_cfg = (char *)"dns"},
@@ -296,5 +296,160 @@ TEST_CASE_METHOD(LibmercTestFixture, "test dns and mdns with recources-mp")
     {
         set_pcap(config.m_pc.c_str());
         dns_check(count, config.m_lc);
+    }
+}
+
+TEST_CASE_METHOD(LibmercTestFixture, "test smb with recources-mp")
+{
+
+    auto smb_check = [&](int expected_count, const struct libmerc_config &config)
+    {
+        initialize(config);
+
+        CHECK(expected_count == counter());
+
+        deinitialize();
+    };
+
+    std::vector<std::pair<test_config, int>> test_set_up{
+        {test_config{
+             .m_lc{.do_analysis = true, .resources = resources_mp_path,
+                .packet_filter_cfg = (char *)"smb"},
+             .m_pc{"smb.pcap"}},
+         391},
+        {test_config{
+             .m_lc{.do_analysis = true, .resources = resources_mp_path,
+                .packet_filter_cfg = (char *)"smb"},
+             .m_pc{"top_100_fingerprints.pcap"}},
+         0}
+    };
+
+    for (auto &[config, count] : test_set_up)
+    {
+        set_pcap(config.m_pc.c_str());
+        smb_check(count, config.m_lc);
+    }
+}
+
+TEST_CASE_METHOD(LibmercTestFixture, "test iec with recources-mp")
+{
+
+    auto iec_check = [&](int expected_count, const struct libmerc_config &config)
+    {
+        initialize(config);
+
+        CHECK(expected_count == counter());
+
+        deinitialize();
+    };
+
+    std::vector<std::pair<test_config, int>> test_set_up{
+        {test_config{
+             .m_lc{.do_analysis = true, .resources = resources_mp_path,
+                .packet_filter_cfg = (char *)"iec"},
+             .m_pc{"iec.pcap"}},
+         42},
+        {test_config{
+             .m_lc{.do_analysis = true, .resources = resources_mp_path,
+                .packet_filter_cfg = (char *)"iec"},
+             .m_pc{"top_100_fingerprints.pcap"}},
+         0}
+    };
+
+    for (auto &[config, count] : test_set_up)
+    {
+        set_pcap(config.m_pc.c_str());
+        iec_check(count, config.m_lc);
+    }
+}
+
+TEST_CASE_METHOD(LibmercTestFixture, "test dnp3 with recources-mp")
+{
+
+    auto dnp3_check = [&](int expected_count, const struct libmerc_config &config)
+    {
+        initialize(config);
+
+        CHECK(expected_count == counter());
+
+        deinitialize();
+    };
+
+    std::vector<std::pair<test_config, int>> test_set_up{
+        {test_config{
+             .m_lc{.do_analysis = true, .resources = resources_mp_path,
+                .packet_filter_cfg = (char *)"dnp3"},
+             .m_pc{"dnp3.pcap"}},
+         15},
+        {test_config{
+             .m_lc{.do_analysis = true, .resources = resources_mp_path,
+                .packet_filter_cfg = (char *)"dnp3"},
+             .m_pc{"top_100_fingerprints.pcap"}},
+         0}
+    };
+
+    for (auto &[config, count] : test_set_up)
+    {
+        set_pcap(config.m_pc.c_str());
+        dnp3_check(count, config.m_lc);
+    }
+}
+
+TEST_CASE_METHOD(LibmercTestFixture, "test decrypted quic with recources-mp")
+{
+
+    auto destination_check_callback = [](const analysis_context *ac)
+    {
+        CHECK(analysis_context_get_fingerprint_type(ac) == 12);
+    };
+
+    auto quic_check = [&](int expected_count, const struct libmerc_config &config)
+    {
+        initialize(config);
+
+        CHECK(expected_count == counter(fingerprint_type_quic,destination_check_callback));
+
+        deinitialize();
+    };
+
+    std::vector<std::pair<test_config, int>> test_set_up{
+        {test_config{
+             .m_lc{.do_analysis = true, .resources = resources_mp_path,
+                .packet_filter_cfg = (char *)"quic"},
+             .m_pc{"quic_decry.pcap"}},
+         1}
+    };
+
+    for (auto &[config, count] : test_set_up)
+    {
+        set_pcap(config.m_pc.c_str());
+        quic_check(count, config.m_lc);
+    }
+}
+
+TEST_CASE_METHOD(LibmercTestFixture, "test nbss with recources-mp")
+{
+
+    auto nbss_check = [&](int expected_count, const struct libmerc_config &config)
+    {
+        initialize(config);
+
+        CHECK(expected_count == counter());
+
+        deinitialize();
+    };
+
+    std::vector<std::pair<test_config, int>> test_set_up{
+        {test_config{
+             .m_lc{.do_analysis = true, .resources = resources_mp_path,
+                .packet_filter_cfg = (char *)"nbss"},
+             .m_pc{"top_100_fingerprints.pcap"}},
+         0}
+    };
+
+    for (auto &[config, count] : test_set_up)
+    {
+        set_pcap(config.m_pc.c_str());
+        nbss_check(count, config.m_lc);
     }
 }

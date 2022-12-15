@@ -28,6 +28,43 @@
 struct global_config;
 static void setup_extended_fields(global_config* lc, const std::string& config);
 
+// extended config allows setting members of global_config which are not part of libmerc_config, via runtime options
+// bool dummy acts as template example to add more configs
+//
+struct extended_config {
+    char* new_proto_str = NULL;
+
+    bool tcp_reassembly = false;
+    //bool dummy = false;
+
+    bool is_set() {return tcp_reassembly;}
+
+    // dummy call for is_set () {return tcp_reassembly||dummy}
+
+    void set_extended_cfg(libmerc_config &cfg, std::string &proto_str) {
+        if (!is_set() || !cfg.packet_filter_cfg) {
+            return;
+        }
+        bool selector_delim = config_contains_delims(cfg.packet_filter_cfg);
+        if (!selector_delim) {
+            proto_str.append(";");
+        }
+        if (tcp_reassembly) {
+            proto_str.append("tcp-reassembly");
+        }
+        // set other options e.g. dummy = true;
+        // if (dummy) {
+        //     proto_str.append(",dummy");
+        // }
+    }
+
+    ~extended_config() {
+        if (new_proto_str) {
+            delete[] new_proto_str;
+        }
+    }
+};
+
 struct global_config : public libmerc_config {
 
 private:
@@ -36,8 +73,13 @@ private:
     static constexpr const char *static_selector_string = STATIC_CFG_SELECT;
 
 public:
-    global_config() : libmerc_config() {};
-    global_config(const libmerc_config& c) : libmerc_config(c) {
+    // extended configs
+    std::string temp_proto_str;
+    bool tcp_reassembly = false;          /* reassemble tcp segments      */
+    size_t tls_fingerprint_format = 0;    // default fingerprint format
+
+    global_config() : libmerc_config(), tcp_reassembly{false} {};
+    global_config(const libmerc_config& c) : libmerc_config(c), tcp_reassembly{false} {
         if(c.resources)
            resource_file = c.resources;
 
@@ -57,24 +99,41 @@ public:
     }
 
     std::map<std::string, bool> protocols {
-            { "all",         false },
-            { "none",        false },
-            { "dhcp",        false },
-            { "dns",         false },
-            { "dtls",        false },
-            { "http",        false },
-            { "ssh",         false },
-            { "tcp",         false },
-            { "tcp.message", false },
-            { "tls",         false },
-            { "wireguard",   false },
-            { "quic",        false },
-            { "smtp",        false },
-            { "tls.client_hello", false},
-            { "tls.server_hello", false},
+            { "all",                    false },
+            { "none",                   false },
+            { "arp",                    false },
+            { "cdp",                    false },
+            { "dhcp",                   false },
+            { "dnp3",                   false },
+            { "dns",                    false },
+            { "dtls",                   false },
+            { "gre",                    false },
+            { "http",                   false },
+            { "http.request",           false },
+            { "http.response",          false },
+            { "icmp",                   false },
+            { "iec",                    false },
+            { "lldp",                   false },
+            { "mdns",                   false },
+            { "nbns",                   false },
+            { "nbds",                   false },
+            { "nbss",                   false },
+            { "ospf",                   false },
+            { "quic",                   false },
+            { "sctp",                   false },
+            { "smb",                    false },
+            { "smtp",                   false },
+            { "ssdp",                   false },
+            { "ssh",                    false },
+            { "stun",                   false },
+            { "tcp",                    false },
+            { "tcp.message",            false },
+            { "tcp.syn_ack",            false },
+            { "tls",                    false },
+            { "tls.client_hello",       false },
+            { "tls.server_hello",       false },
             { "tls.server_certificate", false},
-            { "http.request", false},
-            { "http.response", false},
+            { "wireguard",              false },
         };
 
     bool set_protocols(const std::string& data) {
@@ -107,14 +166,26 @@ public:
         }
         return true;
     }
-    
+
+    bool set_fingerprint_format(const std::string &s) {
+        if (s == "tls") {
+            tls_fingerprint_format = 0;
+        } else if (s == "tls/1") {
+            tls_fingerprint_format = 1;
+        } else {
+            printf_err(log_warning, "warning: unknown fingerprint format: %s; using default instead\n", s.c_str());
+            return false;
+        }
+        return true;
+    }
 };
 
 static void setup_extended_fields(global_config* lc, const std::string& config) {
 
     std::vector<libmerc_option> options = {
         {"select", "-s", "--select", SETTER_FUNCTION(&lc){ lc->set_protocols(s); }},
-        {"resources", "", "", SETTER_FUNCTION(&lc){ lc->set_resource_file(s); }}
+        {"resources", "", "", SETTER_FUNCTION(&lc){ lc->set_resource_file(s); }},
+        {"format", "", "", SETTER_FUNCTION(&lc){ lc->set_fingerprint_format(s); }}
     };
 
     parse_additional_options(options, config, *lc);

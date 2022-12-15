@@ -29,7 +29,7 @@ python      = @PY@
 have_py3    = @PYTHON3@
 have_pip3   = @PIP3@
 have_tpkt3  = @HAVE_TPACKET_V3@
-CDEFS       = $(filter -DHAVE_PYTHON3=1, @DEFS@) -DDEFAULT_RESOURCE_DIR="\"$(datarootdir)\""
+CDEFS       = $(filter -DHAVE_PYTHON3=1 -DHAVE_X86INTRIN_H=1, @DEFS@) -DDEFAULT_RESOURCE_DIR="\"$(datarootdir)\""
 
 include ../Makefile_helper.mk
 
@@ -187,8 +187,8 @@ string: string.cc stringalgs.h options.h
 decode: decode.cc
 	$(CXX) $(CFLAGS) decode.cc -o decode
 
-pcap: pcap.cc pcap_file_io.c pcap_file_io.h
-	$(CXX) $(CFLAGS) pcap.cc pcap_file_io.c -o pcap
+pcap: pcap.cc pcap_file_io.h
+	$(CXX) $(CFLAGS) pcap.cc -o pcap
 
 pcap_filter: pcap_filter.cc pcap_file_io.c libmerc
 	$(CXX) $(CFLAGS) pcap_filter.cc pcap_file_io.c libmerc/libmerc.a -lz -lcrypto -pthread -o pcap_filter
@@ -215,7 +215,7 @@ endif
 #MERC_OBJ = $(MERC:%.o=%.c)
 
 libmerc_test: libmerc_test.c $(LIBMERC_SO) Makefile.in
-	$(CC) -Wall -std=c17 libmerc_test.c -pthread -L./libmerc $(LIBMERC_SO) -lz -lcrypto -o libmerc_test
+	$(CC) -Wall -std=c11 libmerc_test.c -pthread -L./libmerc $(LIBMERC_SO) -lz -lcrypto -o libmerc_test
 	@echo $(COLOR_GREEN) "To run before 'make install', export LD_LIBRARY_PATH=$(shell pwd)/libmerc" $(COLOR_OFF)
 
 libmerc_driver:
@@ -225,7 +225,7 @@ libmerc_driver:
 #
 
 intercept.so: intercept.cc libmerc.a
-	g++ -std=c++17 -Wall -Wno-narrowing intercept.cc libmerc/pkt_proc.cc -D_GNU_SOURCE -I/usr/include/nspr/ -fPIC -shared -lssl -lnspr4 -lgnutls libmerc/libmerc.a -o intercept.so
+	$(CXX) -std=c++17 -Wall -Wno-narrowing intercept.cc libmerc/pkt_proc.cc -D_GNU_SOURCE -I/usr/include/nspr/ -fPIC -shared -lssl -lnspr4 -lgnutls libmerc/libmerc.a -o intercept.so
 
 # special targets
 #
@@ -244,6 +244,7 @@ libmerc-clean:
 distclean: clean
 	rm -rf Makefile autom4te.cache config.log config.status
 	cd libmerc && $(MAKE) distclean
+	cd tables && $(MAKE) distclean
 
 .PHONY: install
 install: libmerc mercury

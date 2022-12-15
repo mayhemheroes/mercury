@@ -12,11 +12,14 @@
 #include <stdint.h>
 #include <arpa/inet.h>
 #include <string.h>
+#include <unistd.h>
 #include <array>
 #include <bitset>
 #include <limits>
 #include <string>
+#include <cassert>
 #include "libmerc.h"  // for enum status
+#include "buffer_stream.h"
 
 /*
  * The mercury_debug macro is useful for debugging (but quite verbose)
@@ -45,7 +48,7 @@ struct datum {
 
     datum() : data{NULL}, data_end{NULL} {}
     datum(const unsigned char *first, const unsigned char *last) : data{first}, data_end{last} {}
-    datum(datum &d, size_t length) {
+    datum(datum &d, ssize_t length) {
         parse(d, length);
     }
     datum(std::pair<const unsigned char *, const unsigned char *> p) : data{p.first}, data_end{p.second} {}
@@ -62,12 +65,13 @@ struct datum {
     bool is_null() const { return data == NULL; }
     bool is_not_null() const { return data != NULL; }
     bool is_not_empty() const { return data != NULL && data < data_end; }
+    bool is_readable() const { return data != NULL && data < data_end; }
     bool is_not_readable() const { return data == NULL || data == data_end; }
     void set_empty() { data = data_end; }
     void set_null() { data = data_end = NULL; }
     ssize_t length() const { return data_end - data; }
-    void parse(struct datum &r, size_t num_bytes) {
-        if (r.length() < (ssize_t)num_bytes) {
+    void parse(struct datum &r, ssize_t num_bytes) {
+        if (r.length() < num_bytes || num_bytes < 0) {
             r.set_null();
             set_null();
             //fprintf(stderr, "warning: not enough data in parse (need %zu, have %zd)\n", num_bytes, length());
@@ -87,7 +91,7 @@ struct datum {
     }
     void parse_up_to_delim(struct datum &r, uint8_t delim) {
         data = r.data;
-        while (r.data <= r.data_end) {
+        while (r.data < r.data_end) {
             if (*r.data == delim) { // found delimeter
                 data_end = r.data;
                 return;
@@ -98,7 +102,7 @@ struct datum {
     }
     uint8_t parse_up_to_delimeters(struct datum &r, uint8_t delim1, uint8_t delim2) {
         data = r.data;
-        while (r.data <= r.data_end) {
+        while (r.data < r.data_end) {
             if (*r.data == delim1) { // found first delimeter
                 data_end = r.data;
                 return delim1;
@@ -113,7 +117,7 @@ struct datum {
     }
     uint8_t parse_up_to_delimeters(struct datum &r, uint8_t delim1, uint8_t delim2, uint8_t delim3) {
         data = r.data;
-        while (r.data <= r.data_end) {
+        while (r.data < r.data_end) {
             if (*r.data == delim1) { // found first delimeter
                 data_end = r.data;
                 return delim1;
@@ -175,9 +179,41 @@ struct datum {
             return true;
         }
     }
-    int memcmp(const datum &p) const {
-        return ::memcmp(data, p.data, length());
+
+    // datum::memcmp(datum &p) compares this datum to p
+    // lexicographically, and returns an integer less than, equal to,
+    // or greater than zero if this is found to be less than, to
+    // match, or to be greater than p, respectively.
+    //
+    // For a nonzero return value, the sign is determined by the sign
+    // of the difference between the first pair of bytes (interpreted
+    // as unsigned char) that differ in this and p.  If this->length()
+    // and p.length() are both zero, the return value is zero.  If one
+    // datum is a prefix of the other, the prefix is considered
+    // lesser.
+    //
+    // Examples (in hexadecimal, where {} is the zero-length string):
+    //
+    //    A = 50555348, B = 504f5354:    A.memcmp(B) < 0
+    //    A = 50555348, B = 5055534820:  A.memcmp(B) < 0
+    //    A = 50555348, B = {}:          A.memcmp(B) > 0
+    //    A = {}, B = {}:                A.memcmp(B) == 0
+    //
+    int cmp(const datum &p) const {
+        int cmp = ::memcmp(data, p.data, std::min(length(), p.length()));
+        if (cmp == 0) {
+            return length() - p.length();
+        }
+        return cmp;
     }
+
+    // operator<(const datum &p) returns true if this is
+    // lexicographically less than p, and false otherwise.  It is
+    // suitable for use in std::sort().
+    //
+    bool operator<(const datum &p) const {
+        return cmp(p) < 0;
+     }
 
     template <size_t N>
     bool cmp(const std::array<uint8_t, N> a) const {
@@ -252,8 +288,26 @@ struct datum {
         {
             return skip(delim_index);
         }
-        
+
         return false;
+    }
+
+// trim_trail(t) skips/trims all instance of trailing char t
+//
+    void trim_trail(unsigned char trail) {
+        if (!is_not_empty())
+            return;
+        const unsigned char *tmp_data = data_end - 1;
+        if (*tmp_data != trail) {
+            return;
+        }
+        while (tmp_data >= data) {
+            if (*tmp_data != trail) { // end of trailing delimiter
+                data_end = tmp_data + 1;
+                return;
+            }
+            tmp_data--;
+        }
     }
 
     bool isupper() {
@@ -276,7 +330,7 @@ struct datum {
                 return false;
             }
         }
-        set_empty();
+        set_null();
         return true;
     }
 
@@ -292,7 +346,7 @@ struct datum {
                 alternatives++;
             }
         }
-        set_empty();
+        set_null();
         return true;
     }
 
@@ -308,6 +362,7 @@ struct datum {
         *output = 0;
     }
 
+    // [[nodiscard]]
     bool lookahead_uint(unsigned int num_bytes, uint64_t *output)
     {
         if (data + num_bytes <= data_end)
@@ -344,6 +399,7 @@ struct datum {
 
     // read_uint8() reads a uint8_t in network byte order, and advances the data pointer
     //
+    [[deprecated("Use encoded<uint8_t> instead.")]]
     bool read_uint8(uint8_t *output) {
         if (data_end > data) {
             *output = *data;
@@ -357,6 +413,7 @@ struct datum {
 
     // read_uint16() reads a uint16_t in network byte order, and advances the data pointer
     //
+    [[deprecated("Use encoded<uint16_t> instead.")]]
     bool read_uint16(uint16_t *output) {
         if (length() >= (int)sizeof(uint16_t)) {
             uint16_t *tmp = (uint16_t *)data;
@@ -371,6 +428,7 @@ struct datum {
 
     // read_uint32() reads a uint32_t in network byte order, and advances the data pointer
     //
+    [[deprecated("Use encoded<uint32_t> instead.")]]
     bool read_uint32(uint32_t *output) {
         if (length() >= (int)sizeof(uint32_t)) {
             uint32_t *tmp = (uint32_t *)data;
@@ -385,6 +443,7 @@ struct datum {
 
     // read_uint() reads a length num_bytes uint in network byte order, and advances the data pointer
     //
+    [[deprecated("Use encoded<> instead.")]]
     bool read_uint(uint64_t *output, unsigned int num_bytes) {
 
         if (data && data + num_bytes <= data_end) {
@@ -448,6 +507,9 @@ struct datum {
 
     void init_from_outer_parser(struct datum *outer,
                                 unsigned int data_len) {
+        if (!outer->is_not_empty()) {
+            return;
+        }
         const unsigned char *inner_data_end = outer->data + data_len;
 
         data = outer->data;
@@ -456,6 +518,15 @@ struct datum {
     }
 
     bool copy(char *dst, ssize_t dst_len) {
+        if (length() > dst_len) {
+            memcpy(dst, data, dst_len);
+            return false;
+        }
+        memcpy(dst, data, length());
+        return true;
+    }
+
+    bool copy(unsigned char *dst, ssize_t dst_len) {
         if (length() > dst_len) {
             memcpy(dst, data, dst_len);
             return false;
@@ -483,6 +554,7 @@ struct datum {
     }
 
     void fprint_hex(FILE *f, size_t length=0) const {
+        if (data == nullptr) { return; }
         const uint8_t *x = data;
         const uint8_t *end = data_end;
         if (length) {
@@ -492,6 +564,22 @@ struct datum {
         while (x < end) {
             fprintf(f, "%02x", *x++);
         }
+    }
+
+    void fprint_c_array(FILE *f, const char *name) const {
+        size_t count = 1;
+        const uint8_t *x = data;
+        fprintf(f, "uint8_t %s[] = {\n    ", name);
+        while (x < data_end - 1) {
+            fprintf(f, "0x%02x,", *x++);
+            if (count++ % 8 == 0) {
+                fputs("\n    ", f);
+            } else {
+                fputc(' ', f);
+            }
+        }
+        fprintf(f, "0x%02x", *x);
+        fputs("\n};\n", f);
     }
 
     void fprint(FILE *f, size_t length=0) const {
@@ -511,6 +599,18 @@ struct datum {
         }
     }
 
+    // fwrite(f) writes the entire datum out to the FILE *f, and on
+    // success, returns the number of bytes written; otherwise, 0 is
+    // returned.  This function can be used to write out seed files
+    // for fuzz testing.
+    //
+    size_t fwrite(FILE *f) const {
+        if (f == nullptr) {
+            return 0;  // error
+        }
+        return ::fwrite(data, sizeof(uint8_t), length(), f);
+    }
+
     ssize_t write_to_buffer(uint8_t *buffer, ssize_t len) {
         if (data) {
             ssize_t copy_len = length() < len ? length() : len;
@@ -520,6 +620,14 @@ struct datum {
         return -1;
     }
 
+    bool is_printable() const {
+        for (const auto & c: *this) {
+            if (!isprint(c)) {
+                return false;
+            }
+        }
+        return true;
+    }
 };
 
 // sanity checks on class datum
@@ -527,53 +635,207 @@ struct datum {
 static_assert(sizeof(datum) == 2 * sizeof(uint8_t *));
 
 
-// data_buffer is a contiguous sequence of bytes into which data can
-// be copied sequentially; the data structure tracks the start of the
-// data (buffer), the location to which data can be written (data),
-// and the end of the data buffer (data_end)
+// class writeable represents a writeable region of memory
 //
-template <size_t T> struct data_buffer {
-    unsigned char buffer[T];
-    unsigned char *data;                /* data being written        */
-    const unsigned char *data_end;      /* end of data buffer        */
+class writeable {
+public:
+    uint8_t *data;
+    uint8_t *data_end;      // TODO: const?
 
-    data_buffer() : data{buffer}, data_end{buffer+T} {  }
+    writeable(uint8_t *begin, uint8_t *end) : data{begin}, data_end{end} { }
+
+    bool is_null() const { return data == nullptr || data_end == nullptr; }
+
+    bool is_not_empty() const { return data < data_end; }
+
+    //    ptrdiff_t length() const { return data_end - data; }
+
+    void set_null() { data = data_end = nullptr; }
+
+    void set_empty() { data = data_end; }
 
     void copy(uint8_t x) {
         if (data + 1 > data_end) {
+            set_null();
             return;  // not enough room
         }
         *data++ = x;
     }
     void copy(const uint8_t *rdata, size_t num_bytes) {
-        if (data_end - data < (int)num_bytes) {
-            num_bytes = data_end - data;
+        if (data_end - data < (ssize_t)num_bytes) {
+            set_null();
+            return;
         }
         memcpy(data, rdata, num_bytes);
         data += num_bytes;
     }
-    void copy(struct datum &r, size_t num_bytes) {
+
+    void write_hex(const uint8_t *src, size_t num_bytes) {
+
+        // check for writeable room; output length is twice the input
+        // length
+        //
+        if (is_null() or data_end - data < 2 * (ssize_t)num_bytes) {
+            set_null();
+            return;
+        }
+
+        char hex_table[] = {
+            '0', '1', '2', '3', '4', '5', '6', '7',
+            '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'
+        };
+
+        for (size_t i=0; i < num_bytes; i++) {
+            *data++ = hex_table[(*src & 0xf0) >> 4];
+            *data++ = hex_table[*src++ & 0x0f];
+        }
+    }
+
+    void write_quote_enclosed_hex(const uint8_t *src, size_t num_bytes) {
+        copy('"');
+        write_hex(src, num_bytes);
+        copy('"');
+    }
+
+    template <typename Type>
+    void write_hex(Type T) {
+        T.write_hex(*this);
+    }
+
+    template <typename Type>
+    void write_quote_enclosed_hex(Type T) {
+        copy('"');
+        write_hex(T);
+        copy('"');
+    }
+
+    // parse(r, num_bytes) copies num_bytes out of r and into this, and
+    // advances r, if this writeable has enough room for the data and
+    // r contains at least num_bytes.  If r.length() < num_bytes, then
+    // r is set to null, and if this->length() < num_bytes, then this
+    // is set to null.
+    //
+    void parse(struct datum &r, size_t num_bytes) {
         if (r.length() < (ssize_t)num_bytes) {
             r.set_null();
             // fprintf(stderr, "warning: not enough data in parse\n");
             return;
         }
         if (data_end - data < (int)num_bytes) {
-            num_bytes = data_end - data;
+            set_null();
+            return;
         }
         memcpy(data, r.data, num_bytes);
         data += num_bytes;
         r.data += num_bytes;
     }
-    void copy(struct datum &r) {
-        copy(r, r.length());
+    void parse(struct datum &r) {
+        parse(r, r.length());
     }
+
+    template <typename Type>
+    writeable & operator<<(Type t) {
+        t.write(*this);
+        return *this;
+    }
+
+    // template specialization for datum
+    //
+    writeable & operator<<(datum d) {
+        if (d.is_not_null()) {
+            parse(d);
+        }
+        return *this;
+    }
+
+};
+
+// data_buffer is a contiguous sequence of bytes into which data can
+// be copied sequentially; the data structure tracks the start of the
+// data (buffer), the location to which data can be written (writeable.data),
+// and the end of the data buffer (writeable.data_end)
+//
+template <size_t T> struct data_buffer : public writeable {
+    unsigned char buffer[T];                                     // TODO: make buffer private
+
+    data_buffer() : writeable{buffer, buffer+T} { }
+
     void reset() { data = buffer; }
     bool is_not_empty() const { return data != buffer && data < data_end; }
-    void set_empty() { data_end = data = buffer; }
-    ssize_t length() const { return data - buffer; }
 
-    datum contents() const { return {buffer, data}; }
+    // data_buffer::readable_length() returns the number of bytes in
+    // the readable region, if the writeable region is not null;
+    // otherwise, zero is returned
+    //
+    ssize_t readable_length() const {
+        if (writeable::is_null()) {
+            return 0;
+        }
+        else {
+            return data - buffer;
+        }
+    }
+
+    datum contents() const {
+        if (writeable::is_null()) {
+            return {nullptr, nullptr};
+        } else {
+            return {buffer, data};
+        }
+    }
+
+    ssize_t writeable_length() const { return data_end - data; }
+
+    ssize_t write(int fd) { return ::write(fd, buffer, data - buffer);  }
+
+    // TODO:
+    //  * add data != nullptr checks
+    //  * add set_null() function
+    //  * use null state to indicate write failure
+    //  * add assert() macros to support debugging
+    //  * add [[nodiscard]] as appropriate
+
+};
+
+// pad_len(length) returns the number that, when added to length,
+// rounds that value up to the next multiple of four
+//
+static inline size_t pad_len(size_t length) {
+    switch (length % 4) {
+    case 3: return 1;
+    case 2: return 2;
+    case 1: return 3;
+    case 0:
+    default:
+        ;
+    }
+    return 0;
+}
+
+// class pad reads and ignores padding data
+//
+class pad {
+    size_t padlen;
+public:
+
+    // constructor for reading (and ignoring) padding data
+    //
+    pad(datum &d, size_t n) : padlen{n} {
+        d.data += padlen;
+        if (d.data > d.data_end) {
+            d.set_null();
+        }
+    }
+
+    // constructor for writing (all-zero) padding data
+    //
+    pad(size_t n) : padlen{n} { }
+
+    void write(writeable &w) {
+        uint8_t zero[4] = {0, 0, 0, 0};
+        w.copy(zero, padlen);
+        assert(padlen <= 5);
+    }
 };
 
 
@@ -619,26 +881,48 @@ bool bit(T s) {
     return (bool) slice<i,i+1>(s);
 }
 
-// encoded<T> represents an integer type T that is read from a byte
-// stream
+// encoded<T> represents an unsigned integer type T that is read from
+// a byte stream
 //
 template <typename T>
 class encoded {
     T val;
 
+    static_assert(std::is_unsigned_v<T>, "T must be an unsigned integer");
+
 public:
 
     encoded(datum &d, bool little_endian=false) {
-        size_t tmp;
-        d.read_uint(&tmp, sizeof(val));
-        val = tmp;
-        if (little_endian) {
-            swap_byte_order();
+        if (d.data == nullptr || d.data + sizeof(T) > d.data_end) {
+            d.set_null();
+            val = 0;
+            return;
         }
+        if (little_endian) {
+            if constexpr (std::is_same_v<T, uint8_t>) {
+                val = d.data[0];
+            } else if constexpr (std::is_same_v<T, uint16_t>) {
+                val = (T)d.data[0] | (T)d.data[1] << 8;
+            } else if constexpr (std::is_same_v<T, uint32_t>) {
+                val = (T)d.data[0] | (T)d.data[1] << 8 | (T)d.data[2] << 16 | (T)d.data[3] << 24;
+            } else if constexpr (std::is_same_v<T, uint64_t>) {
+                val = (T)d.data[0] | (T)d.data[1] << 8 | (T)d.data[2] << 16 | (T)d.data[3] << 24 |
+                      (T)d.data[4] << 32 | (T)d.data[5] << 40 | (T)d.data[6] << 48 | (T)d.data[7] << 56;
+            }
+        } else { // big endian
+            if constexpr (std::is_same_v<T, uint8_t>) {
+                val = d.data[0];
+            } else if constexpr (std::is_same_v<T, uint16_t>) {
+                val = (T)d.data[1] | (T)d.data[0] << 8;
+            } else if constexpr (std::is_same_v<T, uint32_t>) {
+                val = (T)d.data[3] | (T)d.data[2] << 8 | (T)d.data[1] << 16 | (T)d.data[0] << 24;
+            } else if constexpr (std::is_same_v<T, uint64_t>) {
+                val = (T)d.data[7] | (T)d.data[6] << 8 | (T)d.data[5] << 16 | (T)d.data[4] << 24 |
+                      (T)d.data[3] << 32 | (T)d.data[2] << 40 | (T)d.data[1] << 48 | (T)d.data[0] << 56;
+            }
+        }
+        d.data += sizeof(T);
     }
-    //
-    // TODO: re-implement constructor in a way that avoids a temporary
-    // size_t variable, especially for smaller integer types
 
     encoded(const T& rhs) {
         val = rhs;
@@ -690,8 +974,100 @@ public:
     // TODO: add a function slice<i,j>(T newvalue) that sets the bits
     // associated with a slice
 
-    // TODO: add write(data_buffer) function
+    void write(writeable &buf, bool swap_byte_order=false) const {
+        encoded<T> tmp = val;
+        if (swap_byte_order) {
+            tmp.swap_byte_order();
+        }
+        buf.copy((uint8_t *)&tmp, sizeof(T));
 
+        // TODO: rewrite function to eliminate cast
+    }
+
+    // write_hex() writes a hexadecimal representation of this
+    // unsigned integer in network byte order
+    //
+    void write_hex(writeable &w) const {
+        encoded<T> tmp = val;
+        tmp.swap_byte_order();                        // TODO: write endian-generic version
+        w.write_hex((uint8_t *)&tmp, sizeof(T));
+    }
+};
+
+// class type_codes is a wrapper class and can be used to print typecodes. It inherently has a function
+// to write to json_object, a string depending on known typecodes for that class. The class utilises the json_object template function
+// print_key_value to write a type_code string. The type_code class to be wrapped must have a type_code, and functions:
+// template T get_code() to return code value and
+// char* print_code_str() to return code str or returns null for unknown code
+template <typename T>
+class type_codes {
+    const T &code;
+
+public:
+    type_codes(const T &type_code) : code{type_code} {}
+
+    void print_code(buffer_stream &b, encoded<uint8_t> code) {
+        b.write_uint8(code.value());
+    }
+
+    void print_code(buffer_stream &b, encoded<uint16_t> code) {
+        b.write_uint16(code.value());
+    }
+
+    void print_code(buffer_stream &b, uint8_t code) {
+        b.write_uint8(code);
+    }
+
+    void print_code(buffer_stream &b, uint16_t code) {
+        b.write_uint16(code);
+    }
+
+    // template function for code types with custom code writing functions
+    template <typename code_type>
+    void print_code(buffer_stream &b, code_type code) {
+        code.write_code(b);
+    }
+
+    template <typename code_type>
+    void print_unknown_code(buffer_stream &b, code_type code) {
+        b.puts("UNKNOWN (");
+        print_code(b, code);
+        b.puts(")");
+    }
+
+    void fingerprint(buffer_stream &b) {
+        const char* code_str = code.get_code_str();
+        if (!code_str) {
+            print_unknown_code(b, code.get_code());
+        }
+        else {
+            b.puts(code_str);
+        }
+    }
+};
+
+// class literal is a literal std::array of characters
+//
+template <size_t N>
+class literal {
+public:
+    literal(datum &d, const std::array<uint8_t, N> &a) {
+        for (const auto &c : a) {
+            d.accept(c);
+        }
+    }
+};
+
+/* class skip_bytes skips N number of bytes in the given datum*/
+template <size_t N>
+class skip_bytes {
+public:
+    skip_bytes (datum &d) {
+        d.skip(N);
+    }
+    skip_bytes (datum &d, size_t n) {
+        d.skip(n);
+    }
 };
 
 // sanity checks on class encoded<T>
@@ -750,6 +1126,128 @@ inline bool encoded<uint32_t>::unit_test() {
         y.slice<16,32>() == 0xc3df;
 }
 
+template <>
+inline bool encoded<uint64_t>::unit_test() {
+    encoded<uint64_t> y = 0xa1b2c3dfaabbccdd;
+    return
+        ::slice<0,32>(y.value())  == 0xa1b2c3df &&
+        ::slice<0,8>(y.value())   == 0xa1       &&
+        ::slice<4,12>(y.value())  == 0x1b       &&
+        ::slice<8,16>(y.value())  == 0xb2       &&
+        ::slice<24,32>(y.value()) == 0xdf       &&
+        ::slice<16,32>(y.value()) == 0xc3df     &&
+        y.slice<0,32>()  == 0xa1b2c3df &&
+        y.slice<0,8>()   == 0xa1       &&
+        y.slice<4,12>()  == 0x1b       &&
+        y.slice<8,16>()  == 0xb2       &&
+        y.slice<24,32>() == 0xdf       &&
+        y.slice<16,32>() == 0xc3df     &&
+        y.slice<56,64>() == 0xdd;
+}
+
 #endif // NDEBUG
+
+// class lookahead<T> attempts to read an element of type T from a
+// datum, without modifying that datum.  If the read succeeded, then
+// casting the lookahead object to a bool returns true; otherwise, it
+// returns false.  On success, the value of the element can be
+// accessed through the public value member.  To advance the datum
+// forward (e.g. to accept the lookahead object), set its value to
+// that returned by the advance() function.
+//
+// NOTE: advance() will return a null value if the read did not
+// succeed.
+//
+template <typename T>
+class lookahead {
+public:
+    T value;
+private:
+    datum tmp;
+public:
+
+    lookahead(datum d) : value{d}, tmp{d} { }
+
+    explicit operator bool() const { return tmp.is_not_null(); }
+
+    datum advance() const { return tmp; }
+
+};
+
+// class accept<T> attempts to read an element of type T from a datum
+// reference.  If the read succeeded, the datum is advanced forward,
+// and casting the accept<T> object to a bool returns true; otherwise,
+// that cast returns false.  On success, the value of the element can be
+// accessed through the public value member.
+//
+template <typename T>
+class acceptor {
+public:
+    T value;
+private:
+    bool valid;
+public:
+
+    acceptor(datum &d) : value{d}, valid{d.is_not_null()} { }
+
+    operator bool() const { return valid; }
+};
+
+// class optional<T> attempts to read an element of type T from a
+// datum reference.  If the read succeeds, the datum is advanced
+// forward, and casting the optional<T> object to a bool returns true;
+// otherwise, that cast returns false.  On success, the value of the
+// element can be accessed through the public value member.  If the
+// read fails, the datum is left unchanged (it is neither advanced nor
+// set to null).
+//
+template <typename T>
+class optional {
+    datum tmp;
+public:
+    T value;
+private:
+    bool valid;
+public:
+
+    optional(datum &d) :
+        tmp{d},
+        value{tmp},
+        valid{tmp.is_not_null()}
+    {
+        if (valid) {
+            d = tmp;
+        }
+    }
+
+};
+
+// class ignore<T> parses a data element of type T, but then ignores
+// (does not store) its value.  It can be used to check the format of
+// data that need not be stored.
+//
+// TODO: the parameter T should be able to accept any class, not just
+// unsigned integer types
+//
+template <typename T>
+class ignore {
+
+public:
+
+    ignore(datum &d, bool little_endian=false) {
+        (void)little_endian;
+        size_t tmp;
+        d.read_uint(&tmp, sizeof(T));
+    }
+
+    ignore() { }
+
+    // write out null value
+    //
+    void write(writeable &w) {
+        uint8_t zero[sizeof(T)] = { 0, };
+        w.copy(zero, sizeof(T));
+    }
+};
 
 #endif /* DATUM_H */

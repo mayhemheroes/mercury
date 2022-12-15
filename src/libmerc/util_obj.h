@@ -17,6 +17,10 @@ struct ipv4_addr : public datum {
     static const unsigned int bytes_in_addr = 4;
     ipv4_addr() : datum{} { }
 
+    ipv4_addr(struct datum &d) :  datum{} {
+        datum::parse(d, bytes_in_addr);
+    }
+
     void parse(struct datum &d) {
         datum::parse(d, bytes_in_addr);
     }
@@ -160,15 +164,24 @@ struct key {
 struct eth_addr : public datum {
     static const unsigned int bytes_in_addr = 6;
 
-    eth_addr(datum &d) : datum{d} { }
-
-    void parse(struct datum &d) {
+    eth_addr(datum &d) : datum{} {
         datum::parse(d, bytes_in_addr);
     }
 
     void fingerprint(struct buffer_stream &b) const {
-        if (data) {
-            b.raw_as_hex(data, datum::length());  // TODO: write colon-delimited hex
+        if (datum::is_not_null()) {
+            b.write_mac_addr(data);
+        }
+    }
+};
+
+class utf8_string : public datum {
+public:
+    utf8_string(datum &d) : datum{d} { }
+
+    void fingerprint(struct buffer_stream &b) const {
+        if (datum::is_not_null()) {
+            b.write_utf8_string(data, length());
         }
     }
 };

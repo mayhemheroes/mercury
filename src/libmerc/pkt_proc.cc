@@ -21,6 +21,7 @@
 #include "ip.h"
 #include "tcp.h"
 #include "dns.h"
+#include "mdns.h"
 #include "tls.h"
 #include "http.h"
 #include "wireguard.h"
@@ -32,14 +33,20 @@
 #include "icmp.h"
 #include "udp.h"
 #include "quic.h"
+#include "ssdp.h"
+#include "stun.h"
 #include "smtp.h"
 #include "cdp.h"
 #include "lldp.h"
 #include "ospf.h"
+#include "sctp.h"
 #include "analysis.h"
 #include "buffer_stream.h"
 #include "stats.h"
 #include "ppp.h"
+#include "smb1.h"
+#include "smb2.h"
+#include "netbios.h"
 
 // class unknown_initial_packet represents the initial data field of a
 // tcp or udp packet from an unknown protocol
@@ -171,15 +178,33 @@ struct write_metadata {
     }
 
     void operator()(dns_packet &r) {
+        std::string name{"dns"};
+        if (r.netbios()) {
+            name = "nbns";
+        }
+
         if (dns_json_output_) {
-            struct json_object json_dns{record, "dns"};
+            struct json_object json_dns{record, name.c_str()};
             r.write_json(json_dns);
             json_dns.close();
         } else {
-            struct json_object json_dns{record, "dns"};
+            struct json_object json_dns{record, name.c_str()};
             struct datum pkt = r.get_datum();  // get complete packet
             json_dns.print_key_base64("base64", pkt);
             json_dns.close();
+        }
+    }
+
+    void operator()(mdns_packet &r) {
+        if (dns_json_output_) {
+            struct json_object json_mdns{record, "mdns"};
+            r.write_json(json_mdns);
+            json_mdns.close();
+        } else {
+            struct json_object json_mdns{record, "mdns"};
+            struct datum pkt = r.get_datum();  // get complete packet
+            json_mdns.print_key_base64("base64", pkt);
+            json_mdns.close();
         }
     }
 
@@ -202,6 +227,7 @@ struct write_metadata {
     void operator()(tls_server_hello_and_certificate &r) {
         r.write_json(record, metadata_output_, certs_json_output_);
     }
+
     void operator()(std::monostate &r) {
         (void) r;
     }
@@ -209,8 +235,9 @@ struct write_metadata {
 
 struct compute_fingerprint {
     fingerprint &fp_;
+    size_t format_version;
 
-    compute_fingerprint(fingerprint &fp) : fp_{fp} {
+    compute_fingerprint(fingerprint &fp, size_t format=0) : fp_{fp}, format_version{format} {
         fp.init();
     }
 
@@ -219,14 +246,27 @@ struct compute_fingerprint {
         msg.compute_fingerprint(fp_);
     }
 
+    void operator()(tls_client_hello &msg) {
+        msg.compute_fingerprint(fp_, format_version);
+    }
+
     // these protocols are not fingerprinted
     //
+    void operator()(sctp_init &) { }
     void operator()(ospf &) { }
     void operator()(icmp_packet &) { }
     void operator()(wireguard_handshake_init &) { }
     void operator()(unknown_initial_packet &) { }
     void operator()(unknown_udp_initial_packet &) { }
     void operator()(dns_packet &) { }
+    void operator()(mdns_packet &) { }
+    void operator()(ssdp &) { }
+    void operator()(dnp3 &) {}
+    void operator()(smb1_packet &) { }
+    void operator()(smb2_packet &) { }
+    void operator()(iec60870_5_104 &) { }
+    void operator()(nbss_packet &) { }
+    void operator()(nbds_packet &) { }
     void operator()(std::monostate &) { }
 
 };
@@ -257,6 +297,33 @@ struct do_analysis {
     template <typename T>
     bool operator()(T &) {
         return false;   // don't perform analysis for other types
+    }
+
+    bool operator()(std::monostate &) { return false; }
+
+};
+
+struct do_crypto_assessment {
+    const crypto_policy::assessor *ca;
+    json_object &record;
+
+    do_crypto_assessment(const crypto_policy::assessor *assessor, json_object &o) : ca{assessor}, record{o} { }
+
+    bool operator()(const tls_client_hello &msg) {
+        ca->assess(msg, record);
+        return false;
+    }
+
+    bool operator()(const quic_init &msg) {
+        if (msg.has_tls()) {
+            ca->assess(msg.get_tls_client_hello(), record);
+        }
+        return false;
+    }
+
+    template <typename T>
+    bool operator()(const T &) {
+        return false;   // no assessment performed for all other types
     }
 
     bool operator()(std::monostate &) { return false; }
@@ -335,6 +402,7 @@ struct do_observation {
 static constexpr bool report_GRE      = false;
 static constexpr bool report_ICMP     = false;
 static constexpr bool report_OSPF     = false;
+static constexpr bool report_SCTP     = false;
 static constexpr bool report_SYN_ACK  = false;
 
 // set_tcp_protocol() sets the protocol variant record to the data
@@ -353,7 +421,11 @@ void stateful_pkt_proc::set_tcp_protocol(protocol &x,
     // note: std::get<T>() throws exceptions; it might be better to
     // use get_if<T>(), which does not
 
-    enum tcp_msg_type msg_type = (tcp_msg_type) selector.get_tcp_msg_type(pkt.data, pkt.length());
+    enum tcp_msg_type msg_type = (tcp_msg_type) selector.get_tcp_msg_type(pkt);
+    if (msg_type == tcp_msg_type_unknown) {
+        msg_type = (tcp_msg_type) selector.get_tcp_msg_type_from_ports(tcp_pkt);
+    }
+
     switch(msg_type) {
     case tcp_msg_type_http_request:
         x.emplace<http_request>(pkt, ph_visitor);
@@ -365,7 +437,7 @@ void stateful_pkt_proc::set_tcp_protocol(protocol &x,
         {
             struct tls_record rec{pkt};
             struct tls_handshake handshake{rec.fragment};
-            if (tcp_pkt && handshake.additional_bytes_needed) {
+            if (reassembler_ptr && tcp_pkt && handshake.additional_bytes_needed) {
                 tcp_pkt->reassembly_needed(handshake.additional_bytes_needed);
                 return;
             }
@@ -395,8 +467,34 @@ void stateful_pkt_proc::set_tcp_protocol(protocol &x,
     case tcp_msg_type_smtp_server:
         x.emplace<smtp_server>(pkt);
         break;
+    case tcp_msg_type_dns:
+    {
+        /* Trim the 2 byte length field in case of
+         * dns over tcp.
+         */
+        uint16_t len = 0;
+        pkt.read_uint16(&len);
+        pkt.trim_to_length(len);
+        x.emplace<dns_packet>(pkt);
+        break;
+    }
+    case tcp_msg_type_smb1:
+        x.emplace<smb1_packet>(pkt);
+        break;
+    case tcp_msg_type_smb2:
+        x.emplace<smb2_packet>(pkt);
+        break;
+    case tcp_msg_type_iec:
+        x.emplace<iec60870_5_104>(pkt);
+        break;
+    case tcp_msg_type_dnp3:
+        x.emplace<dnp3>(pkt);
+        break;
+    case tcp_msg_type_nbss:
+        x.emplace<nbss_packet>(pkt);
+        break;
     default:
-        if (is_new) {
+        if (is_new && global_vars.output_tcp_initial_data) {
             x.emplace<unknown_initial_packet>(pkt);
         } else {
             x.emplace<std::monostate>();
@@ -416,7 +514,8 @@ void stateful_pkt_proc::set_tcp_protocol(protocol &x,
 void stateful_pkt_proc::set_udp_protocol(protocol &x,
                       struct datum &pkt,
                       enum udp_msg_type msg_type,
-                      bool is_new) {
+                      bool is_new,
+                      const struct key& k) {
 
     // note: std::get<T>() throws exceptions; it might be better to
     // use get_if<T>(), which does not
@@ -427,7 +526,19 @@ void stateful_pkt_proc::set_udp_protocol(protocol &x,
     // }
     switch(msg_type) {
     case udp_msg_type_dns:
-        x.emplace<dns_packet>(pkt);
+        if (mdns_packet::check_if_mdns(k)) {
+            if (!selector.mdns()) {
+                return;
+            }
+            x.emplace<mdns_packet>(pkt);
+        } else {
+            dns_packet packet{pkt};
+            if ((packet.netbios() and !selector.nbns()) or
+                (!packet.netbios() and !selector.dns())) {
+                return;
+            }
+            x = std::move(packet);
+        }
         break;
     case udp_msg_type_dhcp:
         x.emplace<dhcp_discover>(pkt);
@@ -456,7 +567,20 @@ void stateful_pkt_proc::set_udp_protocol(protocol &x,
     case udp_msg_type_wireguard:
         x.emplace<wireguard_handshake_init>(pkt);
         break;
+    case udp_msg_type_ssdp:
+        x.emplace<ssdp>(pkt, ph_visitor);
+        break;
+    case udp_msg_type_stun:
+        x.emplace<stun::message>(pkt);
+        break;
+    case udp_msg_type_nbds:
+        x.emplace<nbds_packet>(pkt);
+        break;
     default:
+       /* if (selector.nbds() and k.src_port == 138 and k.dst_port == 138) {
+            x.emplace<nbds_packet>(pkt);
+            break;
+        }*/
         if (is_new) {
             x.emplace<unknown_udp_initial_packet>(pkt);
         } else {
@@ -464,6 +588,124 @@ void stateful_pkt_proc::set_udp_protocol(protocol &x,
         }
         break;
     }
+}
+
+// returns boolean whether to fingerprrint/analyze current tcp pkt
+bool stateful_pkt_proc::process_tcp_data (protocol &x,
+                          struct datum &pkt,
+                          struct tcp_packet &tcp_pkt,
+                          struct key &k,
+                          struct timespec *ts,
+                          struct tcp_reassembler *reassembler) {
+
+    // No reassembler : call set_tcp_protocol on every data pkt
+    if (!reassembler) {
+        bool is_new = false;
+        if (global_vars.output_tcp_initial_data) {
+            is_new = tcp_flow_table.is_first_data_packet(k, ts->tv_sec, ntohl(tcp_pkt.header->seq));
+        }
+        set_tcp_protocol(x, pkt, is_new, &tcp_pkt);
+        //reassembler->dump_pkt = false;
+        return true;
+    }
+
+    reassembler->curr_reassembly_consumed = false;
+    reassembler->curr_reassembly_state = reassembly_none;
+    uint32_t syn_seq;
+    bool initial_seg = false;
+    bool expired = false;
+    bool in_reassembly = false;
+    struct tcp_seg_context seg_context(tcp_pkt.data_length, ntohl(tcp_pkt.header->seq), tcp_pkt.additional_bytes_needed);
+
+    if (!tcp_pkt.data_length) {
+        reassembler->dump_pkt = false;
+        return false;
+    }
+
+    // try to fetch the syn seq (seq for first data seg) for this flow
+    syn_seq = tcp_flow_table.check_flow(k, ts->tv_sec, ntohl(tcp_pkt.header->seq), initial_seg, expired);
+
+    if (syn_seq) {
+        // In flow table, can't be in reassembly_table
+        if (initial_seg) {
+            // initial seg, try parsing
+            datum pkt_copy{pkt};
+            set_tcp_protocol(x, pkt, true, &tcp_pkt);
+            if(!tcp_pkt.additional_bytes_needed) {
+                reassembler->dump_pkt = false;
+                reassembler->curr_reassembly_state = reassembly_none;
+                return true;
+            }
+            
+            //reassembly required, add to reassembly table
+            seg_context.additional_bytes_needed = tcp_pkt.additional_bytes_needed;
+            reassembler->init_segment(k, ts->tv_sec, seg_context, syn_seq, pkt_copy);
+            //write_pkt = true;
+            reassembler->dump_pkt = true;
+            reassembler->curr_reassembly_state = reassembly_in_progress;
+            return false;
+        }
+        else {
+            // non initial seg, directly put in reassembler
+            reassembler->init_segment(k, ts->tv_sec, seg_context, syn_seq, pkt);
+            // write_pkt = false; for out of order pkts, write to pcap file only after initial seg is known
+            reassembler->dump_pkt = false;
+            reassembler->curr_reassembly_state = reassembly_in_progress;
+            return false;
+        }
+    }
+    else {
+        // check in reassembly_table
+        //if initial segment, update additional bytes needed
+        //
+        datum pkt_copy{pkt};
+        if (reassembler->is_init_seg(k, seg_context.seq)) {
+            set_tcp_protocol(x, pkt, true, &tcp_pkt);
+            seg_context.additional_bytes_needed = tcp_pkt.additional_bytes_needed;
+        }
+
+        bool reassembly_consumed = false;
+        struct tcp_segment *seg = reassembler->check_packet(k, ts->tv_sec, seg_context, pkt_copy, reassembly_consumed);
+        if (reassembly_consumed) {
+            // reassmebled data already consumed for this flow
+            reassembler->pruner.nodes[seg->prune_index].is_in_map = false;
+            reassembler->remove_segment(k);
+            reassembler->dump_pkt = false;
+            reassembler->curr_reassembly_state = reassembly_done;
+            return false;
+        }
+        if (seg) {
+            in_reassembly = true;
+            
+            if (seg->total_bytes_needed) {
+                reassembler->dump_pkt = true;
+            }
+            
+            if(seg->done) {
+                reassembler->pruner.nodes[seg->prune_index].is_in_map = false;
+                struct datum reassembled_data = seg->get_reassembled_segment();
+                set_tcp_protocol(x, reassembled_data, true, &tcp_pkt);
+                reassembler->dump_pkt = false;
+                reassembler->curr_reassembly_consumed = true;
+                reassembler->curr_reassembly_state = reassembly_done;
+                return true;
+            }
+
+            reassembler->curr_reassembly_state = reassembly_in_progress;
+        }    
+    }
+
+    if (!syn_seq && !in_reassembly) {
+        // data pkt without syn, try to process as new data pkt
+        // TODO: add to table to prevent processing again
+        set_tcp_protocol(x, pkt, false, &tcp_pkt);
+        reassembler->dump_pkt = false;
+        reassembler->curr_reassembly_state = reassembly_none;
+        return true;
+    }
+
+    return false;
+
 }
 
 size_t stateful_pkt_proc::ip_write_json(void *buffer,
@@ -481,7 +723,7 @@ size_t stateful_pkt_proc::ip_write_json(void *buffer,
 
     // process encapsulations
     //
-    if (report_GRE && transport_proto == ip::protocol::gre) {
+    if (selector.gre() && transport_proto == ip::protocol::gre) {
         gre_header gre{pkt};
         switch(gre.get_protocol_type()) {
         case ETH_TYPE_IP:
@@ -497,11 +739,14 @@ size_t stateful_pkt_proc::ip_write_json(void *buffer,
     // process transport/application protocols
     //
     protocol x;
-    if (report_ICMP && (transport_proto == ip::protocol::icmp || transport_proto == ip::protocol::ipv6_icmp)) {
+    if (selector.icmp() && (transport_proto == ip::protocol::icmp || transport_proto == ip::protocol::ipv6_icmp)) {
         x.emplace<icmp_packet>(pkt);
 
-    } else if (report_OSPF && transport_proto == ip::protocol::ospfigp) {
+    } else if (selector.ospf() && transport_proto == ip::protocol::ospfigp) {
         x.emplace<ospf>(pkt);
+
+    } else if (selector.sctp() && transport_proto == ip::protocol::sctp) {
+        x.emplace<sctp_init>(pkt);
 
     } else if (transport_proto == ip::protocol::tcp) {
         tcp_packet tcp_pkt{pkt, &ip_pkt};
@@ -511,61 +756,57 @@ size_t stateful_pkt_proc::ip_write_json(void *buffer,
         tcp_pkt.set_key(k);
         if (tcp_pkt.is_SYN()) {
 
-            if (global_vars.output_tcp_initial_data) {
-                tcp_flow_table.syn_packet(k, ts->tv_sec, ntohl(tcp_pkt.header->seq));
-            }
+            tcp_flow_table.syn_packet(k, ts->tv_sec, ntohl(tcp_pkt.header->seq));
             if (selector.tcp_syn()) {
                 x = tcp_pkt; // process tcp syn
             }
             // note: we could check for non-empty data field
 
         } else if (tcp_pkt.is_SYN_ACK()) {
-            if (global_vars.output_tcp_initial_data) {
-                tcp_flow_table.syn_packet(k, ts->tv_sec, ntohl(tcp_pkt.header->seq));
-            }
-            if (report_SYN_ACK && selector.tcp_syn()) {
+            tcp_flow_table.syn_packet(k, ts->tv_sec, ntohl(tcp_pkt.header->seq));
+            if (selector.tcp_syn() and selector.tcp_syn_ack()) {
                 x = tcp_pkt;  // process tcp syn/ack
             }
             // note: we could check for non-empty data field
 
         } else {
-
-            bool is_new = false;
-            if (global_vars.output_tcp_initial_data) {
-                is_new = tcp_flow_table.is_first_data_packet(k, ts->tv_sec, ntohl(tcp_pkt.header->seq));
+            //bool write_pkt = false;
+            if (!process_tcp_data(x, pkt, tcp_pkt, k, ts, reassembler)) {
+                return 0;
             }
-            set_tcp_protocol(x, pkt, is_new, reassembler == nullptr ? nullptr : &tcp_pkt);
         }
 
     } else if (transport_proto == ip::protocol::udp) {
         class udp udp_pkt{pkt};
         udp_pkt.set_key(k);
-        enum udp_msg_type msg_type = (udp_msg_type) selector.get_udp_msg_type(pkt.data, pkt.length());
+        enum udp_msg_type msg_type = (udp_msg_type) selector.get_udp_msg_type(pkt);
 
         if (msg_type == udp_msg_type_unknown) {  // TODO: wrap this up in a traffic_selector member function
             udp::ports ports = udp_pkt.get_ports();
+            msg_type = (udp_msg_type) selector.get_udp_msg_type_from_ports(ports);
             // if (ports.src == htons(53) || ports.dst == htons(53)) {
             //     msg_type = udp_msg_type_dns;
             // }
             // if (selector.mdns() && (ports.src == htons(5353) || ports.dst == htons(5353))) {
             //     msg_type = udp_msg_type_dns;
             // }
-            if (ports.dst == htons(4789)) {
+        /*    if (ports.dst == htons(4789)) {
                 msg_type = udp_msg_type_vxlan;
             }
+        */
         }
 
         bool is_new = false;
         if (global_vars.output_udp_initial_data && pkt.is_not_empty()) {
             is_new = ip_flow_table.flow_is_new(k, ts->tv_sec);
         }
-        set_udp_protocol(x, pkt, msg_type, is_new);
+        set_udp_protocol(x, pkt, msg_type, is_new, k);
     }
 
     // process transport/application protocol
     //
     if (std::visit(is_not_empty{}, x)) {
-        std::visit(compute_fingerprint{analysis.fp}, x);
+        std::visit(compute_fingerprint{analysis.fp, global_vars.tls_fingerprint_format}, x);
         bool output_analysis = false;
         if (global_vars.do_analysis && analysis.fp.get_type() != fingerprint_type_unknown) {
             output_analysis = std::visit(do_analysis{k, analysis, c}, x);
@@ -591,6 +832,16 @@ size_t stateful_pkt_proc::ip_write_json(void *buffer,
         if (output_analysis) {
             analysis.result.write_json(record, "analysis");
         }
+        if (crypto_policy) { std::visit(do_crypto_assessment{crypto_policy, record}, x); }
+
+        if (reassembler) {
+            reassembler->write_flags(record, "reassembly_properties");
+            if (reassembler->curr_reassembly_consumed == true) {
+                reassembler->remove_segment(reassembler->reap_it);
+                reassembler->curr_reassembly_consumed = false;
+            }
+        }
+
         write_flow_key(record, k);
         record.print_key_timestamp("event_start", ts);
         record.close();
@@ -604,10 +855,6 @@ size_t stateful_pkt_proc::ip_write_json(void *buffer,
     }
     return 0;
 }
-
-constexpr bool report_ARP  = false;
-constexpr bool report_CDP  = false;
-constexpr bool report_LLDP = false;
 
 using link_layer_protocol = std::variant<std::monostate, arp_packet, cdp, lldp>;
 
@@ -633,17 +880,17 @@ size_t stateful_pkt_proc::write_json(void *buffer,
                              ts,
                              reassembler);
     case ETH_TYPE_ARP:
-        if (report_ARP) {
+        if (selector.arp()) {
             x.emplace<arp_packet>(pkt);
         }
         break;
     case ETH_TYPE_CDP:
-        if (report_CDP) {
+        if (selector.cdp()) {
             x.emplace<cdp>(pkt);
         }
         break;
     case ETH_TYPE_LLDP:
-        if (report_LLDP) {
+        if (selector.lldp()) {
             x.emplace<lldp>(pkt);
         }
         break;
@@ -755,7 +1002,7 @@ bool set_config(std::map<std::string, bool> &config_map, const char *config_stri
 
 bool stateful_pkt_proc::analyze_ip_packet(const uint8_t *packet,
                                           size_t length,
-                                          struct timespec *,
+                                              struct timespec *ts,
                                           struct tcp_reassembler *reassembler) {
 
 
@@ -770,21 +1017,40 @@ bool stateful_pkt_proc::analyze_ip_packet(const uint8_t *packet,
             return 0;  // incomplete tcp header; can't process packet
          }
         tcp_pkt.set_key(k);
-        set_tcp_protocol(x, pkt, false, reassembler == nullptr ? nullptr : &tcp_pkt);
+        if (reassembler) {
+            analysis.flow_state_pkts_needed = false;
+            if (tcp_pkt.is_SYN()) {
+                tcp_flow_table.syn_packet(k, ts->tv_sec, ntohl(tcp_pkt.header->seq));
+            } else if (tcp_pkt.is_SYN_ACK()) {
+                tcp_flow_table.syn_packet(k, ts->tv_sec, ntohl(tcp_pkt.header->seq));
+            } else {
+                if (!process_tcp_data(x, pkt, tcp_pkt, k, ts, reassembler)) {
+                    if (reassembler->curr_reassembly_state == reassembly_in_progress) {
+                        analysis.flow_state_pkts_needed = true;
+                    }
+                    return 0;
+                }
+            }
+        }
+        else {
+            set_tcp_protocol(x, pkt, false, &tcp_pkt);
+        }
 
     } else if (transport_proto == ip::protocol::udp) {
         class udp udp_pkt{pkt};
         udp_pkt.set_key(k);
-        enum udp_msg_type msg_type = (udp_msg_type) selector.get_udp_msg_type(pkt.data, pkt.length());
+        enum udp_msg_type msg_type = (udp_msg_type) selector.get_udp_msg_type(pkt);
 
         if (msg_type == udp_msg_type_unknown) {  // TODO: wrap this up in a traffic_selector member function
             udp::ports ports = udp_pkt.get_ports();
-            if (ports.dst == htons(4789)) {
+            msg_type = (udp_msg_type) selector.get_udp_msg_type_from_ports(ports);
+           /* if (ports.dst == htons(4789)) {
                 msg_type = udp_msg_type_vxlan; // could parse VXLAN header here
             }
+        */
         }
 
-        set_udp_protocol(x, pkt, msg_type, false);
+        set_udp_protocol(x, pkt, msg_type, false, k);
     }
 
     // process protocol data element
@@ -806,7 +1072,23 @@ bool stateful_pkt_proc::analyze_ip_packet(const uint8_t *packet,
                 std::visit(do_observation{k, analysis, mq}, x);
             }
 
+            if (reassembler) {
+                if (reassembler->curr_reassembly_consumed == true) {
+                    reassembler->remove_segment(reassembler->reap_it);
+                    reassembler->curr_reassembly_consumed = false;
+                    analysis.flow_state_pkts_needed = false;
+                }
+            }
+
             return output_analysis;
+        }
+    }
+
+    if (reassembler) {
+        if (reassembler->curr_reassembly_consumed == true) {
+            reassembler->remove_segment(reassembler->reap_it);
+            reassembler->curr_reassembly_consumed = false;
+            analysis.flow_state_pkts_needed = false;
         }
     }
 
@@ -866,6 +1148,13 @@ bool stateful_pkt_proc::analyze_packet(const uint8_t *eth_packet,
         break;
     default:
         break;
+    }
+    return false;
+}
+
+bool stateful_pkt_proc::dump_pkt() {
+    if (reassembler_ptr) {
+        return reassembler_ptr->dump_pkt;
     }
     return false;
 }
