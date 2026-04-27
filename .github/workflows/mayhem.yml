@@ -22,7 +22,7 @@ jobs:
             triplet: x64-linux
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           submodules: recursive
 
@@ -63,16 +63,11 @@ jobs:
           - mayhem/Mayhemfile_mercury
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Start analysis for ${{ matrix.mayhemfile }}
-        uses: ForAllSecure/mcode-action@v1
+        uses: ForAllSecure/mcode-action@long-runs
         with:
           mayhem-token: ${{ secrets.MAYHEM_TOKEN }}
           args: --image ${{ needs.build.outputs.image }} --file ${{ matrix.mayhemfile }} --duration 300
-          sarif-output: sarif
 
-      - name: Upload SARIF file(s)
-        uses: github/codeql-action/upload-sarif@v2
-        with:
-          sarif_file: sarif
